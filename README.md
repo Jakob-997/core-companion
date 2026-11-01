@@ -55,8 +55,8 @@ Camera scanning additionally needs the Linux `zbarcam` utility, commonly
 provided by `zbar-tools`.
 
 The cold signer defaults to 12 words and requires retyping every word. Its
-entropy screen includes a secret, live hash calculation and an exact Python
-reproduction command. These values can recreate the recovery phrase; use only
+entropy screen keeps hashes, the secret live calculation and the exact Python
+reproduction command inside **Audit details**, collapsed by default. These values can recreate the recovery phrase; use only
 a trusted offline computer for verification. The command requires the pinned
 `mnemonic==0.21` package. The dice hash is shown for auditing; the entropy recipe
 uses the normalized dice digits directly.
