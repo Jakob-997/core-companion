@@ -648,12 +648,10 @@ class App(QMainWindow):
 
     def download_bitcoin_core(self):
         if sys.platform != "linux":
-            QDesktopServices.openUrl(QUrl("https://bitcoincore.org/en/download/"))
             QMessageBox.information(
                 self,
                 "Bitcoin Core download",
-                "Automatic download and verification is currently available on Linux. "
-                "Use Bitcoin Core's official download page for this computer.",
+                "Automatic Bitcoin Core download and verification is currently available on Linux only.",
             )
             return
         if self.cold_session:
