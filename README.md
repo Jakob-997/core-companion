@@ -53,6 +53,20 @@ Cold mode requires Linux, Core 32.1+, a RAM-backed `/dev/shm`,
 Camera scanning additionally needs the Linux `zbarcam` utility, commonly
 provided by `zbar-tools`.
 
+The cold signer defaults to 12 words and requires retyping every word. Its
+watch-only export displays a QR containing the wallet name and public receive
+and change descriptors. Use **Import wallet** in the online view to scan that
+QR or paste its contents. Core validates the descriptors, creates a wallet
+with private keys disabled, and scans available blockchain history. A pruned
+node cannot recover history from blocks it no longer stores; Core reports
+that limitation when importing. Large multisig exports may exceed one QR's
+capacity; their public descriptors remain available as text in Wallet policy.
+
+The launcher is hidden once the separate cold signer is ready, and reappears
+when that signer closes. Keys remain confined to the short-lived signer
+process. Entropy audit instructions show the file-hash command and the exact
+mixing format; reproducing a phrase also requires its original OS randomness.
+
 Cold mode turns off all non-loopback network links and system swap. Close other
 programs first; on a low-memory computer, disabling swap can freeze the
 desktop. The app stops its temporary Core process, removes session files from

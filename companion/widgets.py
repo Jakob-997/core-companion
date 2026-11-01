@@ -195,6 +195,13 @@ class IconButton(QPushButton):
     def set_caption(self, text):
         self.caption.setText(text)
         self.setAccessibleName(text)
+        self.updateGeometry()
+
+    def sizeHint(self):
+        return super().sizeHint().expandedTo(self.layout().sizeHint())
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
     def set_glyph(self, glyph):
         self.icon.set_glyph(glyph)

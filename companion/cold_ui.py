@@ -2,6 +2,7 @@
 
 import secrets
 import base64
+import json
 import shutil
 import unicodedata
 from decimal import Decimal
@@ -9,6 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 import qrcode
+from qrcode.exceptions import DataOverflowError
 from PySide6.QtCore import Qt, QRect, QProcess, QEvent
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
@@ -223,12 +225,26 @@ class ColdSignerDialog(QDialog):
         self.fingerprint.setObjectName("Hash")
         self.fingerprint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.fingerprint)
+        audit = _label(
+            "Audit: sha256sum /path/to/wallet.dat\n"
+            "The original temporary file is deleted after hashing. The hash alone cannot reproduce the phrase.\n"
+            "Entropy = SHA256(domain || uint16be(32) || wallet hash || uint16be(32) || "
+            "32 random OS bytes || uint32be(dice length) || ASCII dice), truncated to the selected BIP39 size.\n"
+            "Domain: Core Companion BIP39 entropy v1 followed by a zero byte.", True
+        )
+        audit.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(audit)
         form = QFormLayout()
         self.dice = QLineEdit()
         self.dice.setPlaceholderText("Optional · enter rolls from 1 to 6")
         form.addRow("Dice rolls", self.dice)
+        self.dice_count = _label("0 rolls entered", True)
+        self.dice.textChanged.connect(lambda text: self.dice_count.setText(
+            f"{sum(face in '123456' for face in text)} rolls entered"
+        ))
+        form.addRow("", self.dice_count)
         self.word_count = QComboBox()
-        for count in (24, 21, 18, 15, 12):
+        for count in (12, 15, 18, 21, 24):
             self.word_count.addItem(f"{count} words", count)
         form.addRow("Recovery phrase", self.word_count)
         layout.addLayout(form)
@@ -284,10 +300,16 @@ class ColdSignerDialog(QDialog):
         title = _label("Write down your recovery phrase", False)
         title.setObjectName("Title")
         layout.addWidget(title)
-        layout.addWidget(_label("Keep these words private and in order. You’ll confirm three of them next.", True))
+        layout.addWidget(_label("Write every word in order. You’ll type the full phrase next.", True))
         self.word_grid = QGridLayout()
+        self.word_grid.setHorizontalSpacing(48)
+        self.word_grid.setVerticalSpacing(10)
         self.word_labels = []
-        layout.addLayout(self.word_grid, 1)
+        words_panel = QWidget()
+        words_panel.setLayout(self.word_grid)
+        words_panel.setMaximumWidth(680)
+        layout.addWidget(words_panel, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("Back")
         back.clicked.connect(lambda: self.stack.setCurrentIndex(1))
@@ -304,8 +326,8 @@ class ColdSignerDialog(QDialog):
         title = _label("Confirm your phrase", False)
         title.setObjectName("Title")
         layout.addWidget(title)
-        layout.addWidget(_label("Enter the requested words exactly as they appear on your backup.", True))
-        self.challenge_form = QFormLayout()
+        layout.addWidget(_label("Type every word from your backup in order.", True))
+        self.challenge_form = QGridLayout()
         self.challenge_fields = []
         layout.addLayout(self.challenge_form)
         layout.addStretch()
@@ -524,7 +546,7 @@ class ColdSignerDialog(QDialog):
         detail = QHBoxLayout()
         self.address_qr = QLabel()
         self.address_qr.setObjectName("QR")
-        self.address_qr.setFixedSize(190, 190)
+        self.address_qr.setFixedSize(320, 320)
         self.address_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail.addWidget(self.address_qr, 0, Qt.AlignmentFlag.AlignTop)
         fields = QVBoxLayout()
@@ -680,8 +702,6 @@ class ColdSignerDialog(QDialog):
         heading.setObjectName("Title")
         layout.addWidget(heading)
         protection = QGroupBox("Optional protection")
-        protection.setCheckable(True)
-        protection.setChecked(False)
         content = QVBoxLayout(protection)
         content.setSpacing(8)
         self.use_bip39_passphrase = QCheckBox("Use a BIP39 passphrase")
@@ -717,7 +737,6 @@ class ColdSignerDialog(QDialog):
         self.encrypt_wallet.toggled.connect(self._toggle_wallet_fields)
         self.wallet_show.toggled.connect(self._toggle_wallet_visibility)
         self._toggle_wallet_fields(False)
-        protection.toggled.connect(self._toggle_protection_group)
         layout.addWidget(protection)
         layout.addStretch()
         footer = QHBoxLayout()
@@ -1107,13 +1126,13 @@ class ColdSignerDialog(QDialog):
         self._show_confirmation()
 
     def _show_confirmation(self):
-        self.challenge = sorted(secrets.SystemRandom().sample(range(len(self.words)), 3))
+        self.challenge = list(range(len(self.words)))
         _clear_layout(self.challenge_form)
         self.challenge_fields = []
         for index in self.challenge:
             field = QLineEdit()
             field.setPlaceholderText(f"Word {index + 1}")
-            self.challenge_form.addRow(f"Word {index + 1}", field)
+            self.challenge_form.addWidget(field, index // 3, index % 3)
             self.challenge_fields.append(field)
         for item in self.word_labels:
             item.clear()
@@ -1292,7 +1311,7 @@ class ColdSignerDialog(QDialog):
         answer = QMessageBox.question(
             self,
             "Close cold signer",
-            "This temporary session contains one signer wallet. Close it before opening another wallet?",
+            "Close this wallet and return to wallet selection? Keep your recovery phrase and any BIP39 passphrase to reopen it.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Close,
             QMessageBox.StandardButton.Cancel,
         )
@@ -1368,7 +1387,7 @@ class ColdSignerDialog(QDialog):
         self.address_detail_value.setText(record["address"])
         self.address_detail_label.setText(record.get("label", ""))
         self.address_used_status.setText("✓  Used on this signer" if record.get("used") else "Not marked used")
-        self.address_qr.setPixmap(self._qr_pixmap(record["address"], size=190))
+        self.address_qr.setPixmap(self._qr_pixmap(record["address"], size=320))
         self.stack.setCurrentIndex(11)
 
     def _save_address_detail(self):
@@ -1643,28 +1662,34 @@ class ColdSignerDialog(QDialog):
             QMessageBox.warning(self, "Could not save PSBT", str(exc))
 
     def _export_watchonly_wallet(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export watch-only wallet",
-            "Core-Companion-watch-only.dat",
-            "Bitcoin Core wallet file (*.dat);;All files (*)",
-        )
-        if not path:
-            return
+        descriptors = self.descriptors.toPlainText().splitlines()
+        payload = json.dumps({"name": self.wallet_display_name, "descriptors": descriptors}, separators=(",", ":"))
         try:
-            exported = self.core.export_watchonly_wallet(path)
-        except ColdSetupError as exc:
-            QMessageBox.warning(self, "Watch-only export failed", str(exc))
+            pixmap = self._qr_pixmap(payload, size=480)
+        except (ValueError, DataOverflowError):
+            QMessageBox.warning(self, "Export too large", "This wallet exceeds single-QR capacity. Copy the public descriptors from Wallet policy.")
             return
-        QMessageBox.information(
-            self,
-            "Watch-only wallet exported",
-            f"Saved to:\n{exported}\n\nThis file contains public wallet data, not private keys. "
-            "On the online node, restore it using Bitcoin Core’s Restore Wallet action.",
-        )
+        if not hasattr(self, "export_qr"):
+            layout = self._card()
+            layout.addWidget(_label("Export watch-only wallet"))
+            self.export_qr = QLabel()
+            self.export_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.export_qr)
+            self.export_text = QPlainTextEdit()
+            self.export_text.setReadOnly(True)
+            self.export_text.setMaximumHeight(110)
+            layout.addWidget(self.export_text)
+            back = QPushButton("Back")
+            back.clicked.connect(lambda: self.stack.setCurrentIndex(12))
+            layout.addWidget(back)
+            self.export_page_index = self.stack.count() - 1
+        self.export_qr.setPixmap(pixmap)
+        self.export_text.setPlainText(payload)
+        self.stack.setCurrentIndex(self.export_page_index)
 
     @staticmethod
     def _qr_pixmap(payload, size=240):
+        target_size = size
         code = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=1, border=4)
         code.add_data(payload)
         code.make(fit=True)
@@ -1681,7 +1706,8 @@ class ColdSignerDialog(QDialog):
                     painter.drawRect(QRect(x, y, 1, 1))
         painter.end()
         return QPixmap.fromImage(image).scaled(
-            size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
+            max(size, target_size // size * size), max(size, target_size // size * size),
+            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
         )
 
     def shutdown_core(self):

@@ -339,7 +339,10 @@ class App(QMainWindow):
         title_row.addWidget(self.wallet_picker)
         self.online_name = label("Connect to Bitcoin Core", "Title")
         layout.addLayout(title_row)
-        layout.addWidget(self.online_name)
+        wallet_row = QHBoxLayout()
+        wallet_row.addWidget(self.online_name, 1)
+        wallet_row.addWidget(button("Import wallet", self._import_wallet_dialog))
+        layout.addLayout(wallet_row)
         sync_card = QFrame()
         sync_card.setObjectName("Card")
         sync_layout = QVBoxLayout(sync_card)
@@ -549,7 +552,7 @@ class App(QMainWindow):
         receive_content = QHBoxLayout()
         self.receive_qr = QLabel()
         self.receive_qr.setObjectName("QR")
-        self.receive_qr.setFixedSize(190, 190)
+        self.receive_qr.setFixedSize(320, 320)
         self.receive_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         receive_content.addWidget(self.receive_qr, 0, Qt.AlignmentFlag.AlignTop)
         address_column = QVBoxLayout()
@@ -662,6 +665,86 @@ class App(QMainWindow):
         root = companion_data_dir() / "bitcoin-core"
         binaries = [path for path in root.glob("*/bin/bitcoind") if path.is_file() and os.access(path, os.X_OK)]
         return max(binaries, key=lambda path: path.stat().st_mtime) if binaries else None
+
+    def _import_wallet_dialog(self):
+        if self.service is None:
+            self.statusBar().showMessage("Connect to your online node first.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Import watch-only wallet")
+        dialog.resize(720, 460)
+        layout = QVBoxLayout(dialog)
+        name = QLineEdit()
+        name.setPlaceholderText("Wallet name")
+        layout.addWidget(name)
+        payload = QPlainTextEdit()
+        payload.setPlaceholderText("Scan the cold signer’s public wallet QR, or paste public descriptors")
+        layout.addWidget(payload)
+        scanner = QProcess(dialog)
+        scan = button("Scan QR", lambda: start_scan())
+        scan.setToolTip("Read the public wallet descriptors using your camera.")
+        layout.addWidget(scan)
+        buffer = bytearray()
+
+        def start_scan():
+            executable = shutil.which("zbarcam")
+            if not executable:
+                QMessageBox.information(dialog, "Camera scanner", "Install zbar-tools to scan with a camera, or paste the public descriptors.")
+                return
+            if scanner.state() == QProcess.ProcessState.NotRunning:
+                buffer.clear()
+                scanner.start(executable, ["--quiet", "--raw"])
+
+        def read_scan():
+            buffer.extend(bytes(scanner.readAllStandardOutput()))
+            if len(buffer) > 65536:
+                scanner.kill()
+                buffer.clear()
+                return
+            if b"\n" in buffer:
+                text = bytes(buffer).split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+                payload.setPlainText(text)
+                try:
+                    data = json.loads(text)
+                    if isinstance(data, dict):
+                        name.setText(str(data.get("name", "")))
+                except ValueError:
+                    pass
+                scanner.kill()
+
+        scanner.readyReadStandardOutput.connect(read_scan)
+        scanner.errorOccurred.connect(lambda error: QMessageBox.warning(dialog, "Scanner unavailable", "Could not start the camera scanner.") if error == QProcess.ProcessError.FailedToStart else None)
+
+        def do_import():
+            text = payload.toPlainText().strip()
+            if not text or len(text) > 65536:
+                QMessageBox.warning(dialog, "Wallet data", "Scan or paste the public wallet descriptors.")
+                return
+            try:
+                data = json.loads(text) if text.startswith("{") else {"descriptors": text.splitlines()}
+                if not isinstance(data, dict):
+                    raise ValueError()
+                descriptors = data.get("descriptors")
+            except ValueError:
+                QMessageBox.warning(dialog, "Wallet data", "The wallet QR could not be read.")
+                return
+            wallet_name = name.text().strip() or str(data.get("name", "")).strip()
+            service = self.service
+            scanner.kill()
+            dialog.accept()
+            self.task("Importing wallet and scanning blockchain history…",
+                      lambda: service.import_public_wallet(wallet_name, descriptors),
+                      lambda result: self.connected(service, result))
+
+        footer = QHBoxLayout()
+        footer.addWidget(button("Back", dialog.reject))
+        footer.addStretch()
+        footer.addWidget(button("Import wallet", do_import, True))
+        layout.addLayout(footer)
+        dialog.exec()
+        if scanner.state() != QProcess.ProcessState.NotRunning:
+            scanner.kill()
+            scanner.waitForFinished(3000)
 
     def download_bitcoin_core(self):
         if sys.platform != "linux":
@@ -927,6 +1010,9 @@ class App(QMainWindow):
             arguments.append("--dev-keep-network")
         process.setArguments(arguments)
         process.started.connect(lambda: setattr(self, "cold_process_group", int(process.processId())))
+        process.readyReadStandardOutput.connect(
+            lambda: self.hide() if process.canReadLine() and bytes(process.readLine()).strip() == b"COLD_SIGNER_READY" else None
+        )
         process.finished.connect(self._cold_helper_finished)
         process.errorOccurred.connect(self._cold_helper_error)
         process.start()
@@ -1045,6 +1131,9 @@ class App(QMainWindow):
 
     def _cold_helper_finished(self, exit_code, exit_status):
         self._restore_cold_system()
+        self.tabs.setCurrentIndex(1)
+        self.show()
+        self.raise_()
 
     def _cold_helper_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
@@ -1320,7 +1409,7 @@ class App(QMainWindow):
 
     def received(self, result):
         self.address.setText(result[0])
-        self.receive_qr.setPixmap(self._qr_pixmap(result[0], size=190))
+        self.receive_qr.setPixmap(self._qr_pixmap(result[0], size=320))
         self.receive_used.show()
         self.receive_done.show()
         self.generate_button.hide()
@@ -1343,7 +1432,9 @@ class App(QMainWindow):
                     painter.drawRect(QRect(x, y, 1, 1))
         painter.end()
         return QPixmap.fromImage(image).scaled(
-            size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
+            max(len(matrix), size // len(matrix) * len(matrix)),
+            max(len(matrix), size // len(matrix) * len(matrix)),
+            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
         )
 
     def copy_address(self):
@@ -1459,6 +1550,7 @@ def main(argv=None):
         if dialog.core is None:
             return
         dialog.show()
+        print("COLD_SIGNER_READY", flush=True)
         application.exec()
         return
     window = App(dev_keep_network=args.dev_keep_network)

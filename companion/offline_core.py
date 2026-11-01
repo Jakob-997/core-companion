@@ -36,7 +36,7 @@ class ColdCoreRPC(CoreRPC):
     """RPC operations required only by the isolated cold Core process."""
 
     METHODS = CoreRPC.METHODS | frozenset({
-        "setnetworkactive", "stop", "createwallet", "unloadwallet", "addhdkey",
+        "setnetworkactive", "stop", "createwallet", "unloadwallet", "addhdkey", "setlabel",
         "derivehdkey", "createwalletdescriptor", "getdescriptorinfo",
         "importdescriptors", "walletpassphrase", "walletlock",
         "walletprocesspsbt", "exportwatchonlywallet",

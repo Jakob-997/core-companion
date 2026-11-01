@@ -1,6 +1,7 @@
 """Wallet orchestration only: Core owns balances, addresses and transactions."""
 
 from decimal import Decimal
+from .rpc import CoreError
 
 
 def btc(value):
@@ -10,6 +11,28 @@ def btc(value):
 class WalletService:
     def __init__(self, rpc):
         self.rpc = rpc
+
+    def import_public_wallet(self, name, descriptors):
+        if not name or len(name) > 80 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_" for c in name):
+            raise CoreError("Use a wallet name with letters, numbers, spaces, hyphens or underscores.")
+        if not isinstance(descriptors, list) or not 1 <= len(descriptors) <= 2:
+            raise CoreError("Import one receive descriptor, or receive and change descriptors in that order.")
+        requests = []
+        for index, descriptor in enumerate(descriptors):
+            if not isinstance(descriptor, str) or len(descriptor) > 20000:
+                raise CoreError("Invalid public descriptor.")
+            checked = self.rpc.call("getdescriptorinfo", [descriptor])
+            if checked.get("hasprivatekeys") is not False or checked.get("isrange") is not True:
+                raise CoreError("Import requires ranged public descriptors without private keys.")
+            requests.append({"desc": checked["descriptor"], "timestamp": 0,
+                             "active": True, "internal": index == 1, "range": [0, 1000]})
+        self.rpc.call("createwallet", {"wallet_name": name, "disable_private_keys": True, "blank": True})
+        result = self.rpc.call("importdescriptors", [requests], wallet=name, timeout=3600)
+        if not isinstance(result, list) or len(result) != len(requests) or any(item.get("success") is not True for item in result):
+            details = "; ".join(str(item.get("error", {}).get("message", "Import failed"))
+                                for item in result if item.get("success") is not True) if isinstance(result, list) else "Invalid Core response"
+            raise CoreError(f"Core could not finish the import: {details}. The new wallet remains loaded.")
+        return self.connect()
 
     def connect(self):
         wallets = self.rpc.call("listwallets")

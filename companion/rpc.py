@@ -24,6 +24,7 @@ class CoreRPC:
         "getnetworkinfo", "getblockchaininfo", "listwallets", "getwalletinfo",
         "getbalances", "listtransactions", "listreceivedbyaddress",
         "getnewaddress", "getaddressinfo", "decodepsbt", "analyzepsbt",
+        "getdescriptorinfo", "createwallet", "importdescriptors",
     })
 
     def __init__(self, port, cookie_path):
@@ -37,7 +38,7 @@ class CoreRPC:
         # Never inherit system HTTP proxies or forward credentials on redirects.
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
 
-    def call(self, method, params=None, wallet=None):
+    def call(self, method, params=None, wallet=None, *, timeout=12):
         if method not in self.METHODS:
             raise CoreError("This RPC operation is not enabled in the scaffold.")
         try:
@@ -53,7 +54,7 @@ class CoreRPC:
             headers={"Content-Type": "application/json", "Authorization": "Basic " + base64.b64encode(cookie.encode()).decode()},
         )
         try:
-            response = self.opener.open(request, timeout=12)
+            response = self.opener.open(request, timeout=timeout)
         except HTTPError as exc:
             if exc.code == 401:
                 exc.close()
