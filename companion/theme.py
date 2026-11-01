@@ -16,6 +16,9 @@ QMenu { background: @surface@; padding: 6px; border: 1px solid @border@; }
 QMenu::item { padding: 7px 24px; }
 QWidget#Card, QFrame#Card { background: @surface@; border: 1px solid @border@; border-radius: 12px; }
 QLabel#Brand { color: @text@; font-size: 15px; font-weight: 700; }
+QLabel#CoreStatus { color: @text@; font-size: 15px; font-weight: 700; }
+QLabel#CoreStatus[state="connected"] { color: @accent-strong@; }
+QLabel#CoreStatus[state="error"] { color: @red@; }
 QLabel#Mark { background: @blue-soft@; color: @blue@; border: 1px solid @blue-border@; border-radius: 10px; font-size: 19px; font-weight: 700; }
 QLabel#Title { color: @text@; font-size: 28px; font-weight: 680; }
 QLabel#Heading { color: @text@; font-size: 18px; font-weight: 650; }

@@ -12,8 +12,8 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QRect
-from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPixmap
+from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QRect, QUrl
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
@@ -91,18 +91,15 @@ class App(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._drain)
         self.timer.start(40)
-        self.statusBar().showMessage("Disconnected · connect to an existing Bitcoin Core wallet")
-        if Path(self.cookie.text()).is_file():
-            self.connect()
-        else:
-            self.core_status.setText("No local Core connection found")
+        self.statusBar().showMessage("Bitcoin Core connection is local to this computer")
+        self._set_core_status("Looking for Bitcoin Core…")
     def _menus(self):
         menu = self.menuBar().addMenu("Wallet")
         for text, callback in [
             ("Welcome", lambda: self.tabs.setCurrentIndex(0)),
             ("Choose wallet mode", lambda: self.tabs.setCurrentIndex(1)),
             ("Wallet home", lambda: self.tabs.setCurrentIndex(2)),
-            ("Connection settings…", self.show_connection),
+            ("Advanced connection…", self.show_connection),
             ("Disconnect", self.disconnect),
             ("About Core Companion", self.about),
             ("Close", self.close),
@@ -161,21 +158,36 @@ class App(QMainWindow):
     def _welcome(self):
         page, layout = centered_page(770, 32, 26, "OnboardingPage")
         layout.addWidget(label("Welcome", "Eyebrow"))
-        title = label("Connect to Bitcoin Core", "Title")
-        layout.addWidget(title)
+        layout.addWidget(label("Bitcoin Core", "Title"))
+        intro = label(
+            "Companion checks for Bitcoin Core on this computer. Your node and wallet data stay local.",
+            "Muted",
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
         card = QFrame()
         card.setObjectName("Card")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(18, 16, 18, 16)
-        card_layout.setSpacing(8)
-        card_layout.addWidget(label("LOCAL CONNECTION", "Eyebrow"))
-        self.core_status = label("Checking local Bitcoin Core…", "Muted")
+        card_layout.setSpacing(10)
+        card_layout.addWidget(label("LOCAL NODE", "Eyebrow"))
+        self.core_status = label("Checking for Bitcoin Core…", "CoreStatus")
         card_layout.addWidget(self.core_status)
-        card_layout.addWidget(label("127.0.0.1 · cookie authentication", "Muted"))
+        card_layout.addWidget(label(
+            "Core creates a private local credential for companion apps. "
+            "Companion checks Core's default location; you do not need to open or share it.",
+            "Muted",
+        ))
         row = QHBoxLayout()
         row.addWidget(button("Connect to Bitcoin Core", self.connect, True))
-        row.addWidget(button("Connection settings…", self.show_connection))
+        download = button("Download Bitcoin Core", self.download_bitcoin_core)
+        download.setToolTip("Open the official Bitcoin Core download page and verification instructions.")
+        row.addWidget(download)
         card_layout.addLayout(row)
+        advanced = QHBoxLayout()
+        advanced.addWidget(button("Advanced connection settings…", self.show_connection))
+        advanced.addStretch()
+        card_layout.addLayout(advanced)
         layout.addWidget(card)
         layout.addStretch()
         continue_row = QHBoxLayout()
@@ -183,6 +195,13 @@ class App(QMainWindow):
         continue_row.addWidget(button("Choose wallet mode  →", lambda: self.tabs.setCurrentIndex(1), True))
         layout.addLayout(continue_row)
         self.tabs.addTab(page, "Welcome")
+
+    def _set_core_status(self, text, state="idle"):
+        self.core_status.setText(text)
+        self.core_status.setProperty("state", state)
+        self.core_status.style().unpolish(self.core_status)
+        self.core_status.style().polish(self.core_status)
+        self.core_status.update()
 
     def _mode_page(self):
         page, layout = centered_page(780, 30, 26, "OnboardingPage")
@@ -552,28 +571,37 @@ class App(QMainWindow):
 
     def _connection_dialog(self):
         self.connection = QDialog(self)
-        self.connection.setWindowTitle("Connection · Core Companion")
-        self.connection.setMinimumWidth(640)
+        self.connection.setWindowTitle("Advanced connection · Core Companion")
+        self.connection.setMinimumWidth(580)
         layout = QVBoxLayout(self.connection)
-        layout.setContentsMargins(26, 26, 26, 26)
-        layout.setSpacing(16)
-        layout.addWidget(label("Your Bitcoin Core", "Heading"))
-        layout.addWidget(label("Local connection · 127.0.0.1 · cookie authentication", "Muted"))
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(12)
+        layout.addWidget(label("Advanced connection", "Heading"))
+        layout.addWidget(label(
+            "Use these options only if automatic local detection does not work.", "Muted",
+        ))
         form = QFormLayout()
         form.setSpacing(12)
         self.port = QLineEdit("8332")
-        form.addRow("RPC port", self.port)
+        form.addRow("Core port", self.port)
         if sys.platform == "win32":
             base = Path(os.environ.get("APPDATA", str(Path.home()))) / "Bitcoin"
         else:
             base = Path.home() / ".bitcoin"
         self.cookie = QLineEdit(str(base / ".cookie"))
+        self.cookie.setToolTip(
+            "Bitcoin Core creates this private local access file. Companion reads it on this computer only."
+        )
         row = QHBoxLayout()
         row.addWidget(self.cookie)
-        row.addWidget(button("Browse…", self.choose_cookie))
-        form.addRow("Cookie file", row)
+        row.addWidget(button("Choose…", self.choose_cookie))
+        form.addRow("Core access file", row)
         layout.addLayout(form)
-        note = label("Enable server=1 in Core and restart it. Only already-loaded watch-only wallets appear.\nLocal RPC · default port 8332\nSettings and credentials are not saved. Core configuration is not changed.", "Muted")
+        note = label(
+            "Core creates this private credential for local apps. Keep it private. "
+            "For a manually configured node, enable local RPC. Only loaded watch-only wallets appear.",
+            "Muted",
+        )
         note.setWordWrap(True)
         layout.addWidget(note)
         row = QHBoxLayout()
@@ -590,9 +618,17 @@ class App(QMainWindow):
         self.connection.activateWindow()
 
     def choose_cookie(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Core authentication cookie")
+        path, _ = QFileDialog.getOpenFileName(self, "Select Bitcoin Core local access file")
         if path:
             self.cookie.setText(path)
+
+    def download_bitcoin_core(self):
+        if not QDesktopServices.openUrl(QUrl("https://bitcoincore.org/en/download/")):
+            QMessageBox.information(
+                self,
+                "Bitcoin Core download",
+                "Open https://bitcoincore.org/en/download/ to download and verify Bitcoin Core.",
+            )
 
     def start_cold_signer(self):
         if sys.platform != "linux":
@@ -794,7 +830,7 @@ class App(QMainWindow):
         self.wallet_picker.setEnabled(True)
         if error:
             if hasattr(self, "core_status"):
-                self.core_status.setText("Bitcoin Core is not connected")
+                self._set_core_status("Could not connect. Check that Core is running.", "error")
             self.statusBar().showMessage(error)
         else:
             try:
@@ -829,7 +865,7 @@ class App(QMainWindow):
         self.sync_label.setText("Blockchain sync · not connected")
         self.sync_detail.setText("Local Bitcoin Core")
         self.sync_progress.setValue(0)
-        self.core_status.setText("Bitcoin Core not connected")
+        self._set_core_status("Bitcoin Core not connected", "error")
         self.address.clear()
         self.receive_qr.clear()
         self.psbt.clear()
@@ -851,11 +887,12 @@ class App(QMainWindow):
         try:
             service = WalletService(CoreRPC(self.port.text(), self.cookie.text()))
         except CoreError as exc:
+            self._set_core_status("Could not connect. Check Core or review advanced settings.", "error")
             self.statusBar().showMessage(str(exc))
             return
         self.service = None
         self._clear()
-        self.core_status.setText("Connecting to Bitcoin Core…")
+        self._set_core_status("Connecting to Bitcoin Core…")
         self.task("Connecting to Core…", service.connect, lambda data: self.connected(service, data))
 
     def connected(self, service, data):
@@ -866,7 +903,7 @@ class App(QMainWindow):
             return
         self.connection.hide()
         self.service = service
-        self.core_status.setText("Bitcoin Core connected · local RPC")
+        self._set_core_status("Bitcoin Core connected", "connected")
         self.tabs.setCurrentIndex(1 if self.connection_purpose == "welcome" else 2)
         self.sync_label.setText("Core connected")
         self.sync_detail.setText(f"Block {data['chain'].get('blocks', 0):,}")
@@ -1129,4 +1166,6 @@ def main(argv=None):
     window.show()
     if Path(window.cookie.text()).is_file():
         QTimer.singleShot(0, window.connect)
+    else:
+        window._set_core_status("Bitcoin Core not found. Start it or download it below.", "error")
     application.exec()

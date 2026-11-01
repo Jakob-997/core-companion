@@ -20,11 +20,15 @@ python -m pip install -r requirements.txt
 python run.py
 ```
 
-For the existing-node view, run Core with local RPC enabled, open **Connection**,
-select the node's `.cookie` file and port, and connect. The app reads only from
-`127.0.0.1`, rereads the cookie for each request, and refuses redirects. It
-does not save connection settings or change the Core configuration. Only
-already-loaded wallets with private keys disabled appear in the online view.
+For the existing-node view, start Core with local RPC enabled. Companion looks
+for Core's local access file (`.cookie`) automatically. If needed, open
+**Advanced connection** to choose a custom file or port. This file is a private
+local credential created by Core; keep it private. Companion reads it only on
+this computer, rereads it for each request, and refuses redirects. It does not
+save connection settings or change Core configuration. Only already-loaded
+wallets with private keys disabled appear in the online view. The Welcome
+screen's **Download Bitcoin Core** button opens Core's official download and
+verification page; it does not install Core automatically.
 
 The cold signer button is under **Tools**. Select the installed `bitcoind`
 executable. Cold mode requires Linux, Core 32.1+, a RAM-backed `/dev/shm`,

@@ -43,9 +43,9 @@ class CoreRPC:
         try:
             cookie = self.cookie_path.read_text(encoding="utf-8").strip()
         except OSError:
-            raise CoreError("Cannot read the cookie file. Check Core is running and the path is correct.") from None
+            raise CoreError("Cannot read Core's local access file. Check that Core is running or choose the correct file.") from None
         if ":" not in cookie or "\n" in cookie or "\r" in cookie:
-            raise CoreError("The selected file is not a valid authentication cookie.")
+            raise CoreError("That file does not look like Core's local access file.")
         path = "/" if wallet is None else "/wallet/" + quote(wallet, safe="")
         request = Request(
             f"http://127.0.0.1:{self.port}{path}",
@@ -57,13 +57,13 @@ class CoreRPC:
         except HTTPError as exc:
             if exc.code == 401:
                 exc.close()
-                raise CoreError("Core rejected authentication. Select its current cookie file.") from None
+                raise CoreError("Core rejected the access file. It may have changed; try connecting again.") from None
             if exc.code not in (400, 404, 500):
                 exc.close()
                 raise CoreError(f"Core returned HTTP {exc.code}.") from None
             response = exc
         except (URLError, OSError, TimeoutError):
-            raise CoreError("Cannot reach Core locally. Check its RPC port and enable server=1.") from None
+            raise CoreError("Cannot reach Bitcoin Core. Check that it is running and local RPC is enabled.") from None
         try:
             with response:
                 body = response.read(8 * 1024 * 1024 + 1)
