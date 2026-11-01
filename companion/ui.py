@@ -84,6 +84,11 @@ class App(QMainWindow):
         self.cold_temp_path = None
         self.cold_restoring = False
         self.dev_keep_network = bool(dev_keep_network)
+        self.core_download_process = None
+        self.core_download_stderr = ""
+        self.downloaded_bitcoind = None
+        self.core_download_closing = False
+        self.core_download_cancelled = False
         self._menus()
         self._layout()
         self._connection_dialog()
@@ -174,16 +179,28 @@ class App(QMainWindow):
         self.core_status = label("Checking for Bitcoin Core…", "CoreStatus")
         card_layout.addWidget(self.core_status)
         card_layout.addWidget(label(
-            "Core creates a private local credential for companion apps. "
-            "Companion checks Core's default location; you do not need to open or share it.",
+            "Core connects to Bitcoin and keeps the node data on this computer.",
             "Muted",
         ))
         row = QHBoxLayout()
         row.addWidget(button("Connect to Bitcoin Core", self.connect, True))
-        download = button("Download Bitcoin Core", self.download_bitcoin_core)
-        download.setToolTip("Open the official Bitcoin Core download page and verification instructions.")
-        row.addWidget(download)
+        self.download_button = button("Download & verify Bitcoin Core", self.download_bitcoin_core)
+        self.download_button.setToolTip(
+            "Use Bitcoin Core's official verifier to check trusted release signatures and the downloaded file hash."
+        )
+        row.addWidget(self.download_button)
         card_layout.addLayout(row)
+        download_status = QHBoxLayout()
+        self.download_progress = QProgressBar()
+        self.download_progress.setRange(0, 0)
+        self.download_progress.setTextVisible(False)
+        self.download_progress.setFixedHeight(7)
+        self.download_progress.hide()
+        download_status.addWidget(self.download_progress, 1)
+        self.cancel_download_button = button("Cancel", self.cancel_core_download)
+        self.cancel_download_button.hide()
+        download_status.addWidget(self.cancel_download_button)
+        card_layout.addLayout(download_status)
         advanced = QHBoxLayout()
         advanced.addWidget(button("Advanced connection settings…", self.show_connection))
         advanced.addStretch()
@@ -595,11 +612,11 @@ class App(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(self.cookie)
         row.addWidget(button("Choose…", self.choose_cookie))
-        form.addRow("Core access file", row)
+        form.addRow("Local connection file", row)
         layout.addLayout(form)
         note = label(
-            "Core creates this private credential for local apps. Keep it private. "
-            "For a manually configured node, enable local RPC. Only loaded watch-only wallets appear.",
+            "This file works like a local password that lets Companion connect to Core on this computer. "
+            "Keep it private. For a manually configured node, enable local RPC. Only loaded watch-only wallets appear.",
             "Muted",
         )
         note.setWordWrap(True)
@@ -622,17 +639,155 @@ class App(QMainWindow):
         if path:
             self.cookie.setText(path)
 
+    def _installed_core_binary(self):
+        xdg_data_home = os.environ.get("XDG_DATA_HOME")
+        data_home = Path(xdg_data_home) if xdg_data_home and Path(xdg_data_home).is_absolute() else Path.home() / ".local" / "share"
+        root = data_home / "core-companion" / "bitcoin-core"
+        binaries = [path for path in root.glob("*/bin/bitcoind") if path.is_file() and os.access(path, os.X_OK)]
+        return max(binaries, key=lambda path: path.stat().st_mtime) if binaries else None
+
     def download_bitcoin_core(self):
-        if not QDesktopServices.openUrl(QUrl("https://bitcoincore.org/en/download/")):
+        if sys.platform != "linux":
+            QDesktopServices.openUrl(QUrl("https://bitcoincore.org/en/download/"))
             QMessageBox.information(
                 self,
                 "Bitcoin Core download",
-                "Open https://bitcoincore.org/en/download/ to download and verify Bitcoin Core.",
+                "Automatic download and verification is currently available on Linux. "
+                "Use Bitcoin Core's official download page for this computer.",
             )
+            return
+        if self.cold_session:
+            self.statusBar().showMessage("Close the cold signer before downloading Bitcoin Core.")
+            return
+        if self.core_download_process is not None:
+            return
+        missing = [tool for tool in ("gpg", "wget") if not shutil.which(tool)]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Verification tools required",
+                "Install GPG and wget before downloading Bitcoin Core. "
+                "The Core release will not be installed without verification.",
+            )
+            return
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setWindowTitle("Download & verify Bitcoin Core")
+        dialog.setText(
+            "Bitcoin Core's official verifier checks the signed release hashes and the downloaded file. "
+            "It needs at least three signing keys trusted by GPG. Companion will not import or trust keys for you."
+        )
+        start_button = dialog.addButton("Download & verify", QMessageBox.ButtonRole.AcceptRole)
+        instructions_button = dialog.addButton("Signer instructions", QMessageBox.ButtonRole.HelpRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        if dialog.clickedButton() is instructions_button:
+            QDesktopServices.openUrl(QUrl("https://bitcoincore.org/en/download/"))
+            return
+        if dialog.clickedButton() is not start_button:
+            return
+        self.core_download_stderr = ""
+        self.core_download_cancelled = False
+        self.download_button.setEnabled(False)
+        self.download_progress.show()
+        self.cancel_download_button.show()
+        self._set_core_status("Downloading and verifying Bitcoin Core…")
+        process = QProcess(self)
+        self.core_download_process = process
+        process.readyReadStandardError.connect(lambda p=process: self._read_core_download_error(p))
+        process.finished.connect(
+            lambda code, status, p=process: self._core_download_finished(p, code, status)
+        )
+        process.errorOccurred.connect(lambda error, p=process: self._core_download_error(p, error))
+        process.start(sys.executable, [str(Path(__file__).with_name("core_download.py"))])
+
+    def _read_core_download_error(self, process):
+        self.core_download_stderr += bytes(process.readAllStandardError()).decode("utf-8", "replace")
+
+    def _finish_core_download_ui(self, process):
+        self._read_core_download_error(process)
+        if self.core_download_process is process:
+            self.core_download_process = None
+        self.download_progress.hide()
+        self.cancel_download_button.hide()
+        self.cancel_download_button.setEnabled(True)
+        self.download_button.setEnabled(True)
+
+    def _core_download_finished(self, process, exit_code, exit_status):
+        if self.core_download_process is not process:
+            return
+        output = bytes(process.readAllStandardOutput()).decode("utf-8", "replace").strip()
+        self._finish_core_download_ui(process)
+        if self.core_download_closing:
+            QTimer.singleShot(0, self.close)
+            return
+        if self.core_download_cancelled:
+            self.core_download_cancelled = False
+            self._set_core_status("Bitcoin Core download cancelled")
+            self.statusBar().showMessage("Bitcoin Core download cancelled")
+            return
+        try:
+            result = json.loads(output)
+        except (json.JSONDecodeError, TypeError):
+            result = {"ok": False, "error": "The download helper returned no valid result."}
+        if exit_status != QProcess.ExitStatus.NormalExit or exit_code != 0 or not result.get("ok"):
+            self._set_core_status("Bitcoin Core download was not verified", "error")
+            detail = result.get("error", "The verification process stopped.")
+            logs = self.core_download_stderr.strip()
+            if logs:
+                detail += "\n\n" + logs[-3000:]
+            QMessageBox.critical(self, "Bitcoin Core was not installed", detail)
+            return
+        self.downloaded_bitcoind = result["path"]
+        self._set_core_status(f"Bitcoin Core {result['version']} verified and installed")
+        QMessageBox.information(
+            self,
+            "Bitcoin Core verified",
+            f"Bitcoin Core {result['version']} passed release signature and file-hash checks "
+            f"({result['trusted_signatures']} trusted signatures).\n\n"
+            f"Installed at:\n{result['path']}\n\n"
+            "Start Core to sync the blockchain, then connect to it here.",
+        )
+
+    def _core_download_error(self, process, error):
+        if process != self.core_download_process or error != QProcess.ProcessError.FailedToStart:
+            return
+        self._finish_core_download_ui(process)
+        if self.core_download_closing:
+            QTimer.singleShot(0, self.close)
+            return
+        if self.core_download_cancelled:
+            self.core_download_cancelled = False
+            self._set_core_status("Bitcoin Core download cancelled")
+            self.statusBar().showMessage("Bitcoin Core download cancelled")
+            return
+        self._set_core_status("Bitcoin Core download could not start", "error")
+        QMessageBox.critical(
+            self,
+            "Bitcoin Core download could not start",
+            "The verification helper could not be started. Try launching Companion again.",
+        )
+
+    def cancel_core_download(self):
+        process = self.core_download_process
+        if process is not None and process.state() != QProcess.ProcessState.NotRunning:
+            if not self.core_download_closing:
+                self.core_download_cancelled = True
+            self.cancel_download_button.setEnabled(False)
+            self.statusBar().showMessage("Stopping the Core download and verification…")
+            process.terminate()
+            QTimer.singleShot(4000, lambda p=process: self._kill_core_download(p))
+
+    def _kill_core_download(self, process):
+        if process == self.core_download_process and process.state() != QProcess.ProcessState.NotRunning:
+            process.kill()
 
     def start_cold_signer(self):
         if sys.platform != "linux":
             self.statusBar().showMessage("Cold signer setup currently requires Linux.")
+            return
+        if self.core_download_process is not None:
+            self.statusBar().showMessage("Finish or cancel the Core download before starting cold storage.")
             return
         if self.busy:
             self.statusBar().showMessage("Wait for the local Core connection check to finish, then continue to cold storage.")
@@ -646,12 +801,15 @@ class App(QMainWindow):
         if sys.platform != "linux":
             self.statusBar().showMessage("Cold signer setup currently requires Linux.")
             return
+        if self.core_download_process is not None:
+            self.statusBar().showMessage("Finish or cancel the Core download before starting cold storage.")
+            return
         if self.busy:
             self.statusBar().showMessage("Wait for the local Core connection check to finish, then continue to cold storage.")
             return
         if self.cold_process and self.cold_process.state() != QProcess.ProcessState.NotRunning:
             return
-        suggested = shutil.which("bitcoind") or ""
+        suggested = str(self._installed_core_binary() or shutil.which("bitcoind") or "")
         bitcoind, _ = QFileDialog.getOpenFileName(
             self, "Select Bitcoin Core bitcoind", suggested, "Bitcoin Core daemon (bitcoind);;All files (*)"
         )
@@ -1107,6 +1265,26 @@ class App(QMainWindow):
         self.show_text("About Core Companion", "Core Companion · early development build\n\nThe online view connects to an existing local Bitcoin Core node.\n\nCold signing uses a separate short-lived Core process on Linux. It supports BIP39 create/recovery, BIP87 multisig setup, and Core-backed PSBT review and signing. It does not finalize or broadcast.\n\nPython / Qt Widgets. No browser engine or local web server.")
 
     def closeEvent(self, event):
+        if self.core_download_process is not None:
+            answer = QMessageBox.question(
+                self,
+                "Core download is running",
+                "Stop the download and verification before closing Companion?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.core_download_closing = True
+            process = self.core_download_process
+            if process.state() == QProcess.ProcessState.NotRunning:
+                self._finish_core_download_ui(process)
+                QTimer.singleShot(0, self.close)
+            else:
+                self.cancel_core_download()
+            event.ignore()
+            return
         if not self.cold_session:
             event.accept()
             return

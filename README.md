@@ -10,8 +10,7 @@ to protect funds you cannot afford to lose.
 
 ## Run on Linux
 
-Install Python 3.11+, Bitcoin Core 32.1 or newer, and the pinned Python
-dependencies:
+Install Python 3.11+ and the pinned Python dependencies:
 
 ```sh
 python3 -m venv .venv
@@ -21,14 +20,22 @@ python run.py
 ```
 
 For the existing-node view, start Core with local RPC enabled. Companion looks
-for Core's local access file (`.cookie`) automatically. If needed, open
-**Advanced connection** to choose a custom file or port. This file is a private
-local credential created by Core; keep it private. Companion reads it only on
-this computer, rereads it for each request, and refuses redirects. It does not
-save connection settings or change Core configuration. Only already-loaded
-wallets with private keys disabled appear in the online view. The Welcome
-screen's **Download Bitcoin Core** button opens Core's official download and
-verification page; it does not install Core automatically.
+for Core's local connection file automatically. This is a private password file
+created by Core; keep it private. Companion reads it only on this computer,
+rereads it for each request, and refuses redirects. It does not save connection
+settings or change Core configuration. Only already-loaded wallets with private
+keys disabled appear in the online view.
+
+On Linux x86-64 and ARM64, **Download & verify Bitcoin Core** downloads the
+current stable release, verifies the signed checksum file and archive using
+Bitcoin Core's upstream verifier, then installs the verified package under
+`~/.local/share/core-companion/bitcoin-core/`. It requires `gpg`, `wget`, and at
+least three release signing keys that the user's GPG trust settings accept. The
+app does not import signing keys or assign trust. Follow the [official download
+verification instructions](https://bitcoincore.org/en/download/) to choose
+signers and check their fingerprints before trusting them. If verification
+fails, Core is not installed. The verified `bitcoind` is suggested for cold
+signer setup; the user still starts Core for the online node view.
 
 The cold signer button is under **Tools**. Select the installed `bitcoind`
 executable. Cold mode requires Linux, Core 32.1+, a RAM-backed `/dev/shm`,
@@ -76,8 +83,8 @@ only. Remove this flag before preparing any release build.
 - Full wallet-policy/descriptor QR scanning and an online-node import wizard.
 - Full PSBT review parity with a hardware wallet, finalization, broadcasting,
   fee policy controls or coin selection.
-- Bundled Bitcoin Core, Core download/signature verification, installers,
-  update management or reproducible release builds.
+- Automatic Core updates after installation, installers or reproducible app
+  release builds.
 - Windows cold signer. The existing-node desktop view may run elsewhere, but
   host isolation and cold signing are Linux-only for now.
 
@@ -95,13 +102,16 @@ construction and PSBT review sequence.
 
 ## Dependencies
 
+The Linux Core download and verification action also uses the system `gpg` and
+`wget` commands. On Debian, install them with `sudo apt install gnupg wget`.
+
 ```text
 PySide6-Essentials==6.10.2
 mnemonic==0.21
 qrcode==8.2
 ```
 
-References: [Bitcoin Core 32.1](https://bitcoincore.org/en/releases/32.1/),
+References: [Bitcoin Core download and verification](https://bitcoincore.org/en/download/),
 [Core RPC documentation](https://bitcoincore.org/en/doc/32.0.0/),
 [Trezor python-mnemonic](https://github.com/trezor/python-mnemonic),
 [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki),

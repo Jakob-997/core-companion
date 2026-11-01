@@ -27,6 +27,8 @@ call that RPC instead of adding parallel wallet logic.
   `offline_core.py` and `seed.py`.
 - `rpc.py`: loopback cookie-authenticated RPC client and the online method list.
 - `wallet.py` and `ui.py`: watch-only node view; `ui.py` starts the cold helper.
+- `core_download.py`: invokes Bitcoin Core's upstream release verifier and
+  safely installs the verified Linux package.
 
 ## Runtime boundaries
 
@@ -57,6 +59,25 @@ wallet database is opened by companion code. No arbitrary RPC console is
 exposed. The RPC method allowlist is an application guardrail, not a server-side
 permission boundary: a compromised client with a Core cookie can bypass it.
 Keep Core RPC bound to loopback and do not expose it to a network.
+
+## Bitcoin Core download verification
+
+The Linux download action obtains the current stable version from the official
+download page and invokes the unchanged Bitcoin Core v32.1
+`contrib/verify-binaries/verify.py`. That tool checks that the signed
+`SHA256SUMS` files from both official hosts match, verifies the signatures
+against the current user's GPG trust settings, requires three accepted
+signatures, downloads the selected Linux archive, and checks its SHA-256 hash.
+Only after it exits successfully does `core_download.py` extract the package
+into the app's data directory. The extractor rejects absolute or parent paths,
+links, special files and unexpectedly large members, and stages files before
+renaming the completed directory into place.
+
+The app does not fetch or trust signing keys automatically. The user must
+independently choose signers and configure GPG trust as described in Bitcoin
+Core's official download verification instructions. The upstream verifier
+requires `gpg` and `wget`. The bundled verifier and its MIT license are under
+`companion/vendor/bitcoin-core/`.
 
 ## Seed and key flow
 
