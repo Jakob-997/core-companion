@@ -7,6 +7,7 @@ import re
 import secrets
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -26,6 +27,10 @@ from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession
 from .theme import stylesheet
 from .widgets import ActionRow, ChoiceRow, IconButton, LineIcon
+
+MANAGED_RPC_PORT = 18443
+MANAGED_P2P_PORT = 18444
+PRUNE_TARGET_MIB = 10000
 
 def label(text, name=None):
     widget = QLabel(text)
@@ -50,6 +55,16 @@ def default_cookie_path():
     else:
         base = Path.home() / ".bitcoin"
     return base / ".cookie"
+
+
+def companion_data_dir():
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    data_home = Path(xdg_data_home) if xdg_data_home and Path(xdg_data_home).is_absolute() else Path.home() / ".local" / "share"
+    return data_home / "core-companion"
+
+
+def managed_node_dir():
+    return companion_data_dir() / "bitcoin-node"
 
 
 def centered_page(width=930, top=20, bottom=16, name="Page"):
@@ -99,6 +114,14 @@ class App(QMainWindow):
         self.downloaded_bitcoind = None
         self.core_download_closing = False
         self.core_download_cancelled = False
+        self.core_cookie_path = None
+        self.managed_core_process = None
+        self.node_start_timer = QTimer(self)
+        self.node_start_timer.setInterval(1200)
+        self.node_start_timer.timeout.connect(self._poll_managed_node)
+        self.sync_timer = QTimer(self)
+        self.sync_timer.setInterval(5000)
+        self.sync_timer.timeout.connect(self.refresh_sync_status)
         self._menus()
         self._layout()
         self._connection_dialog()
@@ -410,7 +433,12 @@ class App(QMainWindow):
                 self.tabs.setCurrentIndex(2)
             else:
                 self.connection_purpose = "online"
-                self.show_connection()
+                cookie = default_cookie_path()
+                if cookie.is_file():
+                    self._use_core_connection(cookie, 8332)
+                    self.connect()
+                else:
+                    self._start_managed_node()
 
     def _toggle_help_mode(self):
         self.help_mode = not self.help_mode
@@ -633,9 +661,7 @@ class App(QMainWindow):
         self.connection.activateWindow()
 
     def _installed_core_binary(self):
-        xdg_data_home = os.environ.get("XDG_DATA_HOME")
-        data_home = Path(xdg_data_home) if xdg_data_home and Path(xdg_data_home).is_absolute() else Path.home() / ".local" / "share"
-        root = data_home / "core-companion" / "bitcoin-core"
+        root = companion_data_dir() / "bitcoin-core"
         binaries = [path for path in root.glob("*/bin/bitcoind") if path.is_file() and os.access(path, os.X_OK)]
         return max(binaries, key=lambda path: path.stat().st_mtime) if binaries else None
 
@@ -714,14 +740,83 @@ class App(QMainWindow):
             return
         self.downloaded_bitcoind = result["path"]
         self._set_core_status(f"Bitcoin Core {result['version']} verified and installed")
-        QMessageBox.information(
-            self,
-            "Bitcoin Core verified",
-            f"Bitcoin Core {result['version']} passed release signature and file-hash checks "
-            f"({result['trusted_signatures']} trusted signatures).\n\n"
-            f"Installed at:\n{result['path']}\n\n"
-            "Start Core to sync the blockchain. Companion finds its local connection automatically.",
-        )
+        if self.mode_choice == "online":
+            self._start_managed_node(result["path"])
+        else:
+            self.statusBar().showMessage("Core is ready. Choose Online Node to start syncing and connect.")
+
+    def _use_core_connection(self, cookie_path, port):
+        self.core_cookie_path = Path(cookie_path)
+        self.port.setText(str(port))
+
+    def _start_managed_node(self, binary=None):
+        if sys.platform != "linux":
+            self.statusBar().showMessage("Starting a downloaded Core node is available on Linux.")
+            return
+        default_cookie = default_cookie_path()
+        if default_cookie.is_file():
+            self._use_core_connection(default_cookie, 8332)
+            self.connect()
+            return
+
+        binary = Path(binary) if binary else self._installed_core_binary()
+        if not binary or not binary.is_file():
+            self._set_core_status("Download and verify Bitcoin Core first", "error")
+            self.statusBar().showMessage("Download and verify Bitcoin Core from Welcome, then choose Online Node.")
+            return
+
+        data_dir = managed_node_dir()
+        cookie = data_dir / ".cookie"
+        self._use_core_connection(cookie, MANAGED_RPC_PORT)
+        if cookie.is_file():
+            self._set_core_status("Connecting to your Bitcoin Core node…")
+            self.node_start_timer.start()
+            self._poll_managed_node()
+            return
+
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            data_dir.chmod(0o700)
+            arguments = [
+                f"-datadir={data_dir}",
+                "-daemon=0",
+                "-server=1",
+                f"-prune={PRUNE_TARGET_MIB}",
+                f"-rpcport={MANAGED_RPC_PORT}",
+                f"-port={MANAGED_P2P_PORT}",
+                "-rpcallowip=127.0.0.1",
+                "-rpcbind=127.0.0.1",
+            ]
+            with (data_dir / "companion-startup.log").open("ab", buffering=0) as log_file:
+                self.managed_core_process = subprocess.Popen(
+                    [str(binary), *arguments],
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+        except (OSError, ValueError) as exc:
+            self._set_core_status("Bitcoin Core could not start", "error")
+            self.statusBar().showMessage(f"Could not start Bitcoin Core: {exc}")
+            return
+
+        self._set_core_status("Starting Bitcoin Core and connecting…")
+        self.statusBar().showMessage("Bitcoin Core is starting. Initial blockchain sync will continue in the background.")
+        self.node_start_timer.start()
+        self._poll_managed_node()
+
+    def _poll_managed_node(self):
+        if self.managed_core_process is not None and self.managed_core_process.poll() is not None:
+            self.node_start_timer.stop()
+            self.managed_core_process = None
+            self._set_core_status("Bitcoin Core could not start", "error")
+            self.statusBar().showMessage(
+                f"Bitcoin Core stopped during startup. See {managed_node_dir() / 'companion-startup.log'} for details."
+            )
+            return
+        if self.core_cookie_path and self.core_cookie_path.is_file() and not self.busy:
+            self.connect()
 
     def _core_download_error(self, process, error):
         if process != self.core_download_process or error != QProcess.ProcessError.FailedToStart:
@@ -970,12 +1065,13 @@ class App(QMainWindow):
             except Exception:
                 self.statusBar().showMessage("Unexpected response data. Check Core compatibility.")
 
-    def task(self, message, work, done):
+    def task(self, message, work, done, *, show_message=True):
         if self.busy:
             return
         self.busy = True
         self.wallet_picker.setEnabled(False)
-        self.statusBar().showMessage(message)
+        if show_message:
+            self.statusBar().showMessage(message)
         def worker():
             try:
                 result = work()
@@ -1017,7 +1113,11 @@ class App(QMainWindow):
         if self.busy:
             return
         try:
-            service = WalletService(CoreRPC(self.port.text(), default_cookie_path()))
+            cookie_path = self.core_cookie_path or default_cookie_path()
+            if not cookie_path.is_file() and sys.platform == "linux" and self._installed_core_binary():
+                self._start_managed_node()
+                return
+            service = WalletService(CoreRPC(self.port.text(), cookie_path))
         except CoreError as exc:
             self._set_core_status("Could not connect. Check Core or review advanced settings.", "error")
             self.statusBar().showMessage(str(exc))
@@ -1027,7 +1127,34 @@ class App(QMainWindow):
         self._set_core_status("Connecting to Bitcoin Core…")
         self.task("Connecting to Core…", service.connect, lambda data: self.connected(service, data))
 
+    def update_sync_status(self, chain):
+        initial = bool(chain.get("initialblockdownload"))
+        progress = 100.0 if not initial else float(chain.get("verificationprogress", 0)) * 100
+        self.sync_progress.setValue(max(0, min(1000, round(progress * 10))))
+        self.sync_label.setText(f"Blockchain sync · {progress:.1f}%" if initial else "Blockchain synced")
+        storage = chain.get("size_on_disk")
+        self.sync_detail.setText(
+            f"{storage / (1024 ** 3):.1f} GB on disk"
+            if isinstance(storage, (int, float)) else f"Block {chain.get('blocks', 0):,}"
+        )
+        if initial:
+            self.statusBar().showMessage(
+                f"Bitcoin Core is syncing · {progress:.1f}% verified · wallet data may be incomplete."
+            )
+
+    def refresh_sync_status(self):
+        if not self.service or self.busy:
+            return
+        service = self.service
+        self.task(
+            "Checking sync progress…",
+            lambda: service.rpc.call("getblockchaininfo"),
+            self.update_sync_status,
+            show_message=False,
+        )
+
     def connected(self, service, data):
+        self.node_start_timer.stop()
         if data["chain"].get("chain") != "main":
             self.service = None
             self._clear()
@@ -1037,11 +1164,8 @@ class App(QMainWindow):
         self.service = service
         self._set_core_status("Bitcoin Core connected", "connected")
         self.tabs.setCurrentIndex(1 if self.connection_purpose == "welcome" else 2)
-        self.sync_label.setText("Core connected")
-        self.sync_detail.setText(f"Block {data['chain'].get('blocks', 0):,}")
-        initial = bool(data["chain"].get("initialblockdownload"))
-        progress = 100 if not initial else int(float(data["chain"].get("verificationprogress", 0)) * 100)
-        self.sync_progress.setValue(max(0, min(1000, progress * 10)))
+        self.update_sync_status(data["chain"])
+        self.sync_timer.start()
         self.wallet_picker.blockSignals(True)
         self.wallet_picker.addItems(data["wallets"])
         self.wallet_picker.blockSignals(False)
@@ -1056,6 +1180,7 @@ class App(QMainWindow):
 
     def disconnect(self):
         if not self.busy:
+            self.sync_timer.stop()
             self.service = None
             self._clear()
             self.setWindowTitle("Core Companion")
@@ -1090,11 +1215,7 @@ class App(QMainWindow):
         self.immature.setText(total("immature"))
         info, chain = data["info"], data["chain"]
         self.online_name.setText(f"{info['walletname']} (watch-only)")
-        progress = 100 if not chain.get("initialblockdownload") else int(float(chain.get("verificationprogress", 0)) * 100)
-        self.sync_progress.setValue(max(0, min(1000, progress * 10)))
-        self.sync_label.setText(f"Blockchain sync · {progress}%")
-        storage = chain.get("size_on_disk")
-        self.sync_detail.setText(f"{storage / (1024 ** 3):.1f} GB on disk" if isinstance(storage, (int, float)) else f"Block {chain.get('blocks', 0):,}")
+        self.update_sync_status(chain)
         self.rows = list(reversed(data["transactions"]))
         self.transactions.setRowCount(len(self.rows))
         self.recent.setRowCount(min(4, len(self.rows)))
@@ -1236,7 +1357,7 @@ class App(QMainWindow):
         dialog.exec()
 
     def about(self):
-        self.show_text("About Core Companion", "Core Companion · early development build\n\nThe online view connects to an existing local Bitcoin Core node.\n\nCold signing uses a separate short-lived Core process on Linux. It supports BIP39 create/recovery, BIP87 multisig setup, and Core-backed PSBT review and signing. It does not finalize or broadcast.\n\nPython / Qt Widgets. No browser engine or local web server.")
+        self.show_text("About Core Companion", "Core Companion · early development build\n\nThe online view uses a local Bitcoin Core node. Companion can start the verified node or connect to a running local node.\n\nCold signing uses a separate short-lived Core process on Linux. It supports BIP39 create/recovery, BIP87 multisig setup, and Core-backed PSBT review and signing. It does not finalize or broadcast.\n\nPython / Qt Widgets. No browser engine or local web server.")
 
     def closeEvent(self, event):
         if self.core_download_process is not None:
@@ -1317,7 +1438,13 @@ def main(argv=None):
     window = App(dev_keep_network=args.dev_keep_network)
     window.show()
     if default_cookie_path().is_file():
+        window._use_core_connection(default_cookie_path(), 8332)
         QTimer.singleShot(0, window.connect)
+    elif sys.platform == "linux" and (managed_node_dir() / ".cookie").is_file():
+        window._use_core_connection(managed_node_dir() / ".cookie", MANAGED_RPC_PORT)
+        QTimer.singleShot(0, window.connect)
+    elif sys.platform == "linux" and window._installed_core_binary():
+        window._set_core_status("Bitcoin Core is ready. Choose Online Node to start syncing.")
     else:
         window._set_core_status("Bitcoin Core not found. Start it or download it below.", "error")
     application.exec()

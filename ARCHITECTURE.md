@@ -33,7 +33,7 @@ call that RPC instead of adding parallel wallet logic.
 ## Runtime boundaries
 
 ```text
-Online wallet view ──local cookie RPC──> the user's existing Bitcoin Core
+Online wallet view ──local cookie RPC──> existing Core or managed Core
 
 Cold-session controller ──turn off interfaces and swap──> Linux host
        │
@@ -77,6 +77,15 @@ absolute or parent paths, links, special files and unexpectedly large members,
 and stages files before placing the completed directory in the app's data
 folder. The upstream verifier requires `gpg` and `wget`; it and its MIT license
 are under `companion/vendor/bitcoin-core/`.
+
+When Online Node is selected, Linux starts the verified Core binary in a
+separate app-managed data directory under `~/.local/share/core-companion/`.
+The node enables RPC only on loopback, uses its cookie from that data directory,
+and starts with `-prune=10000`. It runs independently after the UI closes and
+reconnects on the next app launch. Downloading Core does not start the node;
+cold-signer setup therefore does not silently bring up online networking. If a
+Core cookie exists in the standard user data directory, Companion connects to
+that running Core instead.
 
 ## Seed and key flow
 
