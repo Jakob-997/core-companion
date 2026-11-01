@@ -12,8 +12,8 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QRect, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QImage, QPainter, QPixmap
+from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QRect
+from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
@@ -40,6 +40,16 @@ def button(text, action, primary=False):
     widget.clicked.connect(action)
     widget.setCursor(Qt.CursorShape.PointingHandCursor)
     return widget
+
+
+def default_cookie_path():
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", str(Path.home()))) / "Bitcoin"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "Bitcoin"
+    else:
+        base = Path.home() / ".bitcoin"
+    return base / ".cookie"
 
 
 def centered_page(width=930, top=20, bottom=16, name="Page"):
@@ -186,7 +196,7 @@ class App(QMainWindow):
         row.addWidget(button("Connect to Bitcoin Core", self.connect, True))
         self.download_button = button("Download & verify Bitcoin Core", self.download_bitcoin_core)
         self.download_button.setToolTip(
-            "Use Bitcoin Core's official verifier to check trusted release signatures and the downloaded file hash."
+            "Downloads Core and its pinned signer keys, verifies the release, then installs it."
         )
         row.addWidget(self.download_button)
         card_layout.addLayout(row)
@@ -601,22 +611,10 @@ class App(QMainWindow):
         form.setSpacing(12)
         self.port = QLineEdit("8332")
         form.addRow("Core port", self.port)
-        if sys.platform == "win32":
-            base = Path(os.environ.get("APPDATA", str(Path.home()))) / "Bitcoin"
-        else:
-            base = Path.home() / ".bitcoin"
-        self.cookie = QLineEdit(str(base / ".cookie"))
-        self.cookie.setToolTip(
-            "Bitcoin Core creates this private local access file. Companion reads it on this computer only."
-        )
-        row = QHBoxLayout()
-        row.addWidget(self.cookie)
-        row.addWidget(button("Choose…", self.choose_cookie))
-        form.addRow("Local connection file", row)
         layout.addLayout(form)
         note = label(
-            "This file works like a local password that lets Companion connect to Core on this computer. "
-            "Keep it private. For a manually configured node, enable local RPC. Only loaded watch-only wallets appear.",
+            "Companion finds Core's local connection automatically. Keep Core running on this computer "
+            "with local RPC enabled. Only loaded watch-only wallets appear.",
             "Muted",
         )
         note.setWordWrap(True)
@@ -633,11 +631,6 @@ class App(QMainWindow):
         self.connection.show()
         self.connection.raise_()
         self.connection.activateWindow()
-
-    def choose_cookie(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Bitcoin Core local access file")
-        if path:
-            self.cookie.setText(path)
 
     def _installed_core_binary(self):
         xdg_data_home = os.environ.get("XDG_DATA_HOME")
@@ -664,25 +657,8 @@ class App(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Verification tools required",
-                "Install GPG and wget before downloading Bitcoin Core. "
-                "The Core release will not be installed without verification.",
+                "Install the verification tools with `sudo apt install gnupg wget`, then try again.",
             )
-            return
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Icon.Information)
-        dialog.setWindowTitle("Download & verify Bitcoin Core")
-        dialog.setText(
-            "Bitcoin Core's official verifier checks the signed release hashes and the downloaded file. "
-            "It needs at least three signing keys trusted by GPG. Companion will not import or trust keys for you."
-        )
-        start_button = dialog.addButton("Download & verify", QMessageBox.ButtonRole.AcceptRole)
-        instructions_button = dialog.addButton("Signer instructions", QMessageBox.ButtonRole.HelpRole)
-        dialog.addButton(QMessageBox.StandardButton.Cancel)
-        dialog.exec()
-        if dialog.clickedButton() is instructions_button:
-            QDesktopServices.openUrl(QUrl("https://bitcoincore.org/en/download/"))
-            return
-        if dialog.clickedButton() is not start_button:
             return
         self.core_download_stderr = ""
         self.core_download_cancelled = False
@@ -744,7 +720,7 @@ class App(QMainWindow):
             f"Bitcoin Core {result['version']} passed release signature and file-hash checks "
             f"({result['trusted_signatures']} trusted signatures).\n\n"
             f"Installed at:\n{result['path']}\n\n"
-            "Start Core to sync the blockchain, then connect to it here.",
+            "Start Core to sync the blockchain. Companion finds its local connection automatically.",
         )
 
     def _core_download_error(self, process, error):
@@ -1041,7 +1017,7 @@ class App(QMainWindow):
         if self.busy:
             return
         try:
-            service = WalletService(CoreRPC(self.port.text(), self.cookie.text()))
+            service = WalletService(CoreRPC(self.port.text(), default_cookie_path()))
         except CoreError as exc:
             self._set_core_status("Could not connect. Check Core or review advanced settings.", "error")
             self.statusBar().showMessage(str(exc))
@@ -1340,7 +1316,7 @@ def main(argv=None):
         return
     window = App(dev_keep_network=args.dev_keep_network)
     window.show()
-    if Path(window.cookie.text()).is_file():
+    if default_cookie_path().is_file():
         QTimer.singleShot(0, window.connect)
     else:
         window._set_core_status("Bitcoin Core not found. Start it or download it below.", "error")

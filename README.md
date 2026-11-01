@@ -19,23 +19,23 @@ python -m pip install -r requirements.txt
 python run.py
 ```
 
-For the existing-node view, start Core with local RPC enabled. Companion looks
-for Core's local connection file automatically. This is a private password file
-created by Core; keep it private. Companion reads it only on this computer,
-rereads it for each request, and refuses redirects. It does not save connection
-settings or change Core configuration. Only already-loaded wallets with private
-keys disabled appear in the online view.
+For the existing-node view, start Core with local RPC enabled. Companion finds
+Core's local connection automatically; there is no file path to set up. It reads
+Core's private local credential for each request and refuses redirects. Only
+already-loaded wallets with private keys disabled appear in the online view.
 
 On Linux x86-64 and ARM64, **Download & verify Bitcoin Core** downloads the
 current stable release, verifies the signed checksum file and archive using
 Bitcoin Core's upstream verifier, then installs the verified package under
-`~/.local/share/core-companion/bitcoin-core/`. It requires `gpg`, `wget`, and at
-least three release signing keys that the user's GPG trust settings accept. The
-app does not import signing keys or assign trust. Follow the [official download
-verification instructions](https://bitcoincore.org/en/download/) to choose
-signers and check their fingerprints before trusting them. If verification
-fails, Core is not installed. The verified `bitcoind` is suggested for cold
-signer setup; the user still starts Core for the online node view.
+`~/.local/share/core-companion/bitcoin-core/`. The app automatically downloads
+eight pinned release-signing keys into a temporary GPG keyring, checks their
+full fingerprints, and requires three valid signatures. It never changes the
+user's GPG keyring. The fingerprints are listed in `core_download.py` and were
+confirmed as signers of Bitcoin Core v32.1's official `SHA256SUMS.asc`. Key
+rotation requires an app update. GPG and wget are required; on Debian, install them with
+`sudo apt install gnupg wget`. If verification fails, Core is not installed.
+The verified `bitcoind` is suggested for cold-signer setup; the user still
+starts Core for the online node view.
 
 The cold signer button is under **Tools**. Select the installed `bitcoind`
 executable. Cold mode requires Linux, Core 32.1+, a RAM-backed `/dev/shm`,

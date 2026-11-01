@@ -64,20 +64,19 @@ Keep Core RPC bound to loopback and do not expose it to a network.
 
 The Linux download action obtains the current stable version from the official
 download page and invokes the unchanged Bitcoin Core v32.1
-`contrib/verify-binaries/verify.py`. That tool checks that the signed
-`SHA256SUMS` files from both official hosts match, verifies the signatures
-against the current user's GPG trust settings, requires three accepted
-signatures, downloads the selected Linux archive, and checks its SHA-256 hash.
-Only after it exits successfully does `core_download.py` extract the package
-into the app's data directory. The extractor rejects absolute or parent paths,
-links, special files and unexpectedly large members, and stages files before
-renaming the completed directory into place.
-
-The app does not fetch or trust signing keys automatically. The user must
-independently choose signers and configure GPG trust as described in Bitcoin
-Core's official download verification instructions. The upstream verifier
-requires `gpg` and `wget`. The bundled verifier and its MIT license are under
-`companion/vendor/bitcoin-core/`.
+`contrib/verify-binaries/verify.py`. It downloads eight pinned public signing
+keys into a temporary GPG home, checks every full fingerprint against the
+allowlist in `core_download.py`, and marks only those keys trusted in that
+temporary home. The verifier checks the signed `SHA256SUMS` files from both
+official hosts, requires at least three accepted signatures, downloads the
+selected Linux archive, and checks its SHA-256 hash. The user's personal GPG
+keyring is not modified. The pinned set was confirmed against Bitcoin Core
+v32.1's official `SHA256SUMS.asc`; signer rotation requires a reviewed app
+update. Only after verification succeeds does the app install the package. The extractor rejects
+absolute or parent paths, links, special files and unexpectedly large members,
+and stages files before placing the completed directory in the app's data
+folder. The upstream verifier requires `gpg` and `wget`; it and its MIT license
+are under `companion/vendor/bitcoin-core/`.
 
 ## Seed and key flow
 

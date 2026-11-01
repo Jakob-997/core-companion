@@ -43,9 +43,9 @@ class CoreRPC:
         try:
             cookie = self.cookie_path.read_text(encoding="utf-8").strip()
         except OSError:
-            raise CoreError("Cannot read Core's local access file. Check that Core is running or choose the correct file.") from None
+            raise CoreError("Could not find Core's local connection. Start Core on this computer and try again.") from None
         if ":" not in cookie or "\n" in cookie or "\r" in cookie:
-            raise CoreError("That file does not look like Core's local access file.")
+            raise CoreError("Core's local connection could not be read. Restart Core and try again.")
         path = "/" if wallet is None else "/wallet/" + quote(wallet, safe="")
         request = Request(
             f"http://127.0.0.1:{self.port}{path}",
@@ -57,7 +57,7 @@ class CoreRPC:
         except HTTPError as exc:
             if exc.code == 401:
                 exc.close()
-                raise CoreError("Core rejected the access file. It may have changed; try connecting again.") from None
+                raise CoreError("Core did not accept the local connection. Restart Core and try again.") from None
             if exc.code not in (400, 404, 500):
                 exc.close()
                 raise CoreError(f"Core returned HTTP {exc.code}.") from None

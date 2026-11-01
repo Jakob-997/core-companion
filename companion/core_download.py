@@ -17,6 +17,20 @@ from pathlib import Path, PurePosixPath
 DOWNLOAD_PAGE = "https://bitcoincore.org/en/download/"
 VERIFIER = Path(__file__).parent / "vendor" / "bitcoin-core" / "verify.py"
 MINIMUM_TRUSTED_SIGNATURES = 3
+# Signers of Bitcoin Core v32.1's official SHA256SUMS.asc:
+# https://bitcoincore.org/bin/bitcoin-core-32.1/SHA256SUMS.asc
+# Three of these eight pinned keys must sign the release checksum.
+TRUSTED_RELEASE_SIGNERS = (
+    "152812300785C96444D3334D17565732E08E5E41",
+    "0AD83877C1F0CD1EE9BD660AD7CC770B81FD22A8",
+    "CFB16E21C950F67FA95E558F2EEB9F5CC09526C1",
+    "F4FC70F07310028424EFC20A8E4256593F177720",
+    "E61773CD6E01040E2F1BD78CE7E2984B6289C93A",
+    "F2CFC4ABD0B99D837EEBB7D09B79B45691DB4173",
+    "ED9BDF7AD6A55E232E84524257FF9BDBCC301009",
+    "A0083660F235A27000CD3C81CE6EC49945C17EA6",
+)
+KEYSERVER = "hkps://keys.openpgp.org"
 MAX_FILE_SIZE = 1024 * 1024 * 1024
 MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
 active_verifier = None
@@ -26,7 +40,58 @@ class CoreDownloadError(Exception):
     pass
 
 
-def _stop_verifier(signum, _frame):
+def _run_gpg(args, environment, input_text=None):
+    global active_verifier
+    active_verifier = subprocess.Popen(
+        ["gpg", "--batch", *args],
+        env=environment,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        text=True,
+    )
+    try:
+        output, error = active_verifier.communicate(input=input_text, timeout=35)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_active_process()
+        raise CoreDownloadError("Timed out while retrieving Core signing keys.") from exc
+    code = active_verifier.returncode
+    active_verifier = None
+    return code, output, error
+
+
+def _prepare_signing_keyring(home):
+    home.mkdir(mode=0o700)
+    environment = os.environ.copy()
+    environment["GNUPGHOME"] = str(home)
+    trusted = []
+    for fingerprint in TRUSTED_RELEASE_SIGNERS:
+        code, _, _ = _run_gpg(
+            ["--keyserver", KEYSERVER, "--recv-keys", fingerprint], environment
+        )
+        if code:
+            print(f"Could not retrieve pinned signer {fingerprint[-8:]}; trying the remaining keys.", file=sys.stderr, flush=True)
+            continue
+        code, output, _ = _run_gpg(["--with-colons", "--fingerprint", fingerprint], environment)
+        if code == 0 and any(
+            len(fields) > 9 and fields[0] == "fpr" and fields[9].upper() == fingerprint
+            for fields in (line.split(":") for line in output.splitlines())
+        ):
+            trusted.append(fingerprint)
+
+    if len(trusted) < MINIMUM_TRUSTED_SIGNATURES:
+        raise CoreDownloadError("Could not retrieve three pinned Bitcoin Core signing keys.")
+
+    ownertrust = "".join(f"{fingerprint}:6:\n" for fingerprint in trusted)
+    code, _, _ = _run_gpg(["--import-ownertrust"], environment, ownertrust)
+    if code:
+        raise CoreDownloadError("Could not prepare the temporary Core verification keyring.")
+    return environment
+
+
+def _terminate_active_process():
+    global active_verifier
     if active_verifier and active_verifier.poll() is None:
         try:
             os.killpg(active_verifier.pid, signal.SIGTERM)
@@ -36,6 +101,11 @@ def _stop_verifier(signum, _frame):
                 os.killpg(active_verifier.pid, signal.SIGKILL)
             except OSError:
                 pass
+    active_verifier = None
+
+
+def _stop_verifier(signum, _frame):
+    _terminate_active_process()
     raise SystemExit(128 + signum)
 
 
@@ -144,12 +214,13 @@ def download_and_verify():
     expected_archive = f"bitcoin-{version}-{architecture}-linux-gnu.tar.gz"
     temp_root = Path(tempfile.mkdtemp(prefix="core-companion-verify-"))
     temp_root.chmod(0o700)
+    gpg_home = temp_root / "gnupg"
     old_handlers = {
         signal.SIGTERM: signal.signal(signal.SIGTERM, _stop_verifier),
         signal.SIGINT: signal.signal(signal.SIGINT, _stop_verifier),
     }
     try:
-        environment = os.environ.copy()
+        environment = _prepare_signing_keyring(gpg_home)
         environment["TMPDIR"] = str(temp_root)
         command = [
             sys.executable,
@@ -179,7 +250,7 @@ def download_and_verify():
         if code != 0:
             raise CoreDownloadError(
                 f"Bitcoin Core verification did not pass (verifier exit {code}). "
-                "Check GPG trusted keys and the app's status output."
+                "The pinned signer threshold was not met; review the status output."
             )
         try:
             report = json.loads(output)
@@ -211,6 +282,15 @@ def download_and_verify():
         }
     finally:
         active_verifier = None
+        try:
+            subprocess.run(
+                ["gpgconf", "--homedir", str(gpg_home), "--kill", "all"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
         shutil.rmtree(temp_root, ignore_errors=True)
