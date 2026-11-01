@@ -144,7 +144,8 @@ class OfflineCore:
                 )
             try:
                 info = self.rpc.call("getnetworkinfo")
-                if int(info.get("version", 0)) < 321000:
+                # Core encodes versions as major * 10000 + minor * 100 + patch.
+                if int(info.get("version", 0)) < 320100:
                     self.close()
                     raise ColdSetupError("Cold signer setup requires Bitcoin Core 32.1 or newer.")
                 state = self.rpc.call("setnetworkactive", [False])
