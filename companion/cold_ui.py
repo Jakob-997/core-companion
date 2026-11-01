@@ -313,6 +313,7 @@ class ColdSignerDialog(QDialog):
         back.clicked.connect(lambda: self.stack.setCurrentIndex(1))
         footer.addWidget(back)
         footer.addStretch()
+        self._add_confirmation_skip(footer)
         next_button = QPushButton("I wrote it down")
         next_button.setObjectName("Primary")
         next_button.clicked.connect(self._show_confirmation)
@@ -334,11 +335,22 @@ class ColdSignerDialog(QDialog):
         self.confirm_back.clicked.connect(self._back_from_confirmation)
         footer.addWidget(self.confirm_back)
         footer.addStretch()
+        self._add_confirmation_skip(footer)
         continue_button = QPushButton("Continue")
         continue_button.setObjectName("Primary")
         continue_button.clicked.connect(self._confirm_phrase)
         footer.addWidget(continue_button)
         layout.addLayout(footer)
+
+    def _add_confirmation_skip(self, footer):
+        if self.dev_keep_network:
+            skip = QPushButton("Skip confirmation (testing)")
+            skip.clicked.connect(self._skip_confirmation)
+            footer.addWidget(skip)
+
+    def _skip_confirmation(self):
+        if self.dev_keep_network and self.phrase:
+            self._show_protection()
 
     def _build_multisig_page(self):
         card = QWidget()

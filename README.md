@@ -84,7 +84,10 @@ remain disabled until they are restored manually or the computer is restarted.
 
 For development only, `python run.py --dev-keep-network` leaves host networking
 enabled while exercising the cold-signer flow. Bitcoin Core peer networking
-remains disabled, and system swap is still turned off. This bypass weakens the
+remains disabled. This mode also adds **Skip confirmation (testing)** on the
+recovery-phrase display and confirmation screens; normal launches require every
+word. System swap is still turned off.
+This bypass weakens the
 host isolation: other programs can still access the network. Use test wallets
 only. Remove this flag before preparing any release build.
 
