@@ -65,6 +65,13 @@ QProgressBar::chunk { border-radius: 4px; background: @red@; }
 QPushButton#Quiet { border-color: transparent; background: transparent; color: @muted@; }
 QPushButton#Quiet:hover { color: @text@; background: @surface-2@; }
 QPushButton#Quiet[active="true"] { color: @blue@; background: @blue-soft@; }
+QPushButton#ToolbarButton { min-height: 32px; padding: 0 9px; border-color: transparent; border-radius: 7px; background: transparent; color: @muted@; font-weight: 550; }
+QPushButton#ToolbarButton:hover { border-color: @border@; background: @surface-2@; color: @text@; }
+QPushButton#ToolbarButton:pressed, QPushButton#ToolbarButton[active="true"] { border-color: @blue-border@; background: @blue-soft@; color: @blue@; }
+QLabel#ToolbarIcon { color: @muted@; }
+QLabel#ToolbarText { color: @muted@; font-size: 12px; }
+QPushButton#ToolbarButton:hover QLabel#ToolbarText, QPushButton#ToolbarButton[active="true"] QLabel#ToolbarText { color: @text@; }
+QToolTip { color: @text@; background: @surface@; border: 1px solid @border@; padding: 6px 8px; }
 QFrame#ActionRow, QFrame#ActionPrimary { min-height: 74px; border: 1px solid @border@; border-radius: 9px; background: @surface@; }
 QFrame#ActionRow:hover { background: @surface-2@; border-color: @blue-border@; }
 QFrame#ActionPrimary { background: @blue-soft@; border-color: @blue-border@; }

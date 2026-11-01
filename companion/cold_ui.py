@@ -28,7 +28,7 @@ from .seed import (
     validate_phrase,
 )
 from .theme import stylesheet
-from .widgets import ActionRow, ChoiceRow, LineIcon
+from .widgets import ActionRow, ChoiceRow, IconButton, LineIcon
 
 
 def _label(text, muted=False):
@@ -95,14 +95,12 @@ class ColdSignerDialog(QDialog):
         brand.setObjectName("Brand")
         header.addWidget(brand)
         header.addStretch()
-        self.help_button = QPushButton("ⓘ  Help")
-        self.help_button.setObjectName("Quiet")
-        self.help_button.setToolTip("Turn on instant explanations. Hover over a control to see what it does.")
-        self.help_button.clicked.connect(self._toggle_help_mode)
+        self.help_button = IconButton(
+            "i", "Help", self._toggle_help_mode,
+            tooltip="Turn on instant explanations. Hover over a control to see what it does.",
+        )
         header.addWidget(self.help_button)
-        self.theme_button = QPushButton("◐  Dark mode")
-        self.theme_button.setObjectName("Quiet")
-        self.theme_button.clicked.connect(self._toggle_theme)
+        self.theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         header.addWidget(self.theme_button)
         root.addLayout(header)
         self.stack = QStackedWidget()
@@ -591,9 +589,8 @@ class ColdSignerDialog(QDialog):
         appearance = QHBoxLayout()
         appearance.addWidget(_label("Appearance", False))
         appearance.addStretch()
-        theme = QPushButton("◐  Dark mode")
-        theme.clicked.connect(self._toggle_theme)
-        appearance.addWidget(theme)
+        self.settings_theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
+        appearance.addWidget(self.settings_theme_button)
         layout.addLayout(appearance)
         layout.addWidget(_label("Cold signer session", False))
         self.session_details = _label("Networking and swap are disabled for this session.", True)
@@ -1306,7 +1303,7 @@ class ColdSignerDialog(QDialog):
 
     def _toggle_help_mode(self):
         self.help_mode = not self.help_mode
-        self.help_button.setText("ⓘ  Help on" if self.help_mode else "ⓘ  Help")
+        self.help_button.set_caption("Help on" if self.help_mode else "Help")
         self.help_button.setProperty("active", self.help_mode)
         self.help_button.style().unpolish(self.help_button)
         self.help_button.style().polish(self.help_button)
@@ -1314,7 +1311,11 @@ class ColdSignerDialog(QDialog):
     def _toggle_theme(self):
         self.dark_mode = not self.dark_mode
         self.setStyleSheet(stylesheet(self.dark_mode))
-        self.theme_button.setText("☼  Light mode" if self.dark_mode else "◐  Dark mode")
+        caption = "Light mode" if self.dark_mode else "Dark mode"
+        glyph = "light" if self.dark_mode else "dark"
+        for control in (self.theme_button, self.settings_theme_button):
+            control.set_caption(caption)
+            control.set_glyph(glyph)
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.Enter and self.help_mode and watched.toolTip():

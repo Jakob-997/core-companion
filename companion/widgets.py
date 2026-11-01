@@ -21,11 +21,15 @@ _ICONS = {
     "import": '<path d="M4 14v5h16v-5M12 3v11m-4-4 4 4 4-4M7 3.5h10"/>',
     "key": '<circle cx="8.5" cy="15.5" r="4.5"/><path d="m11.7 12.3 7.8-7.8 2 2-2.4 2.4 1.6 1.6-2.2 2.2-1.6-1.6-2.1 2.1"/>',
     "multisig": '<circle cx="6" cy="7" r="2.4"/><circle cx="18" cy="7" r="2.4"/><circle cx="12" cy="17" r="2.4"/><path d="m8 8.5 2.7 6.2m5.3-6.2-2.7 6.2M8.5 7h7"/>',
+    "help": '<circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.5 2.5 0 1 1 4.3 1.8c-1.2 1.1-1.9 1.4-1.9 3.2M12 17h.01"/>',
+    "dark": '<path d="M12 3a9 9 0 1 0 0 18V3Z"/><circle cx="12" cy="12" r="9"/>',
+    "light": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
 }
 _ICON_ALIASES = {
     "▦": "scan", "▣": "wallet", "⚙": "settings", "⌘": "policy",
     "↓": "receive", "⇧": "activity", "❄": "cold", "◉": "node",
     "＋": "new", "↻": "import",
+    "i": "help", "◐": "dark", "☼": "light",
 }
 
 
@@ -40,6 +44,11 @@ class LineIcon(QLabel):
             self.setText(glyph)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def set_glyph(self, glyph):
+        self._paths = _ICONS.get(_ICON_ALIASES.get(glyph, glyph))
+        self.setText("" if self._paths else glyph)
+        self.update()
 
     def paintEvent(self, event):
         if not self._paths:
@@ -160,3 +169,32 @@ class ChoiceRow(QPushButton):
         self.radio.style().unpolish(self.radio)
         self.radio.style().polish(self.radio)
         self.radio.update()
+
+
+class IconButton(QPushButton):
+    """Small icon-and-label button for the desktop header."""
+
+    def __init__(self, glyph, text, callback, *, tooltip=""):
+        super().__init__()
+        self.setObjectName("ToolbarButton")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(text)
+        self.setToolTip(tooltip or text)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 0, 8, 0)
+        row.setSpacing(6)
+        self.icon = LineIcon(glyph, "ToolbarIcon", stroke_width=2.1, inset=0)
+        self.icon.setFixedSize(16, 16)
+        row.addWidget(self.icon)
+        self.caption = QLabel(text)
+        self.caption.setObjectName("ToolbarText")
+        self.caption.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        row.addWidget(self.caption)
+        self.clicked.connect(callback)
+
+    def set_caption(self, text):
+        self.caption.setText(text)
+        self.setAccessibleName(text)
+
+    def set_glyph(self, glyph):
+        self.icon.set_glyph(glyph)

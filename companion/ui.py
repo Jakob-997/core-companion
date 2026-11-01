@@ -25,7 +25,7 @@ from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession
 from .theme import stylesheet
-from .widgets import ActionRow, ChoiceRow, LineIcon
+from .widgets import ActionRow, ChoiceRow, IconButton, LineIcon
 
 def label(text, name=None):
     widget = QLabel(text)
@@ -124,14 +124,14 @@ class App(QMainWindow):
         toolbar.addWidget(mark)
         toolbar.addWidget(label("Core Companion", "Brand"))
         toolbar.addStretch()
-        self.help_button = button("ⓘ  Help", self._toggle_help_mode)
-        self.help_button.setObjectName("Quiet")
-        self.help_button.setToolTip("Turn on instant explanations. Hover over a control to see what it does.")
+        self.help_button = IconButton(
+            "i", "Help", self._toggle_help_mode,
+            tooltip="Turn on instant explanations. Hover over a control to see what it does.",
+        )
         toolbar.addWidget(self.help_button)
-        self.theme_button = button("◐  Dark mode", self._toggle_theme)
-        self.theme_button.setObjectName("Quiet")
+        self.theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         toolbar.addWidget(self.theme_button)
-        toolbar.addWidget(button("Connection", self.show_connection))
+        toolbar.addWidget(IconButton("node", "Connection", self.show_connection))
         root.addLayout(toolbar)
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
@@ -363,7 +363,7 @@ class App(QMainWindow):
 
     def _toggle_help_mode(self):
         self.help_mode = not self.help_mode
-        self.help_button.setText("ⓘ  Help on" if self.help_mode else "ⓘ  Help")
+        self.help_button.set_caption("Help on" if self.help_mode else "Help")
         self.help_button.setProperty("active", self.help_mode)
         self.help_button.style().unpolish(self.help_button)
         self.help_button.style().polish(self.help_button)
@@ -371,7 +371,8 @@ class App(QMainWindow):
     def _toggle_theme(self):
         self.dark_mode = not self.dark_mode
         self.setStyleSheet(stylesheet(self.dark_mode))
-        self.theme_button.setText("☼  Light mode" if self.dark_mode else "◐  Dark mode")
+        self.theme_button.set_caption("Light mode" if self.dark_mode else "Dark mode")
+        self.theme_button.set_glyph("light" if self.dark_mode else "dark")
 
     def _install_help_targets(self):
         for widget in self.findChildren(QWidget):
