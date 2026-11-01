@@ -78,13 +78,6 @@ def entropy_material(wallet_digest, os_entropy, dice_rolls=""):
     )
 
 
-def entropy_commitment(wallet_digest, os_entropy):
-    """Bind the pre-dice inputs without displaying the no-dice seed entropy."""
-    if any(not isinstance(value, bytes) or len(value) != 32 for value in (wallet_digest, os_entropy)):
-        raise SeedError("Commitment inputs must each be 32 bytes.")
-    return hashlib.sha256(b"Core Companion entropy commitment v1\x00" + wallet_digest + os_entropy).digest()
-
-
 def phrase_from_entropy(entropy):
     """Encode standard-length entropy with Trezor's English BIP39 wordlist."""
     if not isinstance(entropy, bytes) or len(entropy) not in WORD_COUNTS.values():

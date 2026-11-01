@@ -59,8 +59,8 @@ entropy screen keeps hashes, the secret live calculation and the exact Python
 reproduction command inside **Audit details**, collapsed by default. These values can recreate the recovery phrase; use only
 a trusted offline computer for verification. The command requires the pinned
 `mnemonic==0.21` package. Details show actual OS-random bytes, the wallet-file
-hash and live dice digits, one exact SHA-256 command and the resulting BIP39
-entropy. A second short command converts that entropy into the same words.
+hash and live dice digits, one exact SHA-256 command and its resulting starting
+entropy. The command prints precisely the entropy bytes used by the wallet.
 
 Its
 watch-only export displays a QR containing the wallet name and public receive

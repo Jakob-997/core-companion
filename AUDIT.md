@@ -74,21 +74,19 @@ password fields and hidden online wallet actions until a wallet is loaded.
 These follow-up checks do not establish end-to-end signing, camera access or
 host network/swap restoration.
 
-The displayed pre-dice commitment uses a separate domain from seed generation,
-so it does not reveal the seed entropy when no dice are entered. The actual
-wallet digest and OS bytes are fixed before dice entry and reused on Generate.
+The wallet digest and OS bytes are fixed before dice entry and reused on
+Generate. The collapsed secret Audit details contains only three labeled
+inputs (actual OS RNG bytes, wallet.dat SHA-256, normalized live dice rolls),
+one SHA-256 command that combines them using the unchanged v1 recipe, and the
+resulting starting entropy. The command prints the selected entropy length
+and was checked against the application's entropy for every supported word
+count. BIP39 word-conversion commands and redundant commitment displays were
+removed. Generation and audit serialization remain independently checked.
 
-The entropy screen now additionally exposes a deliberately **secret** calculation
-panel: actual OS-random bytes, the wallet-file hash, normalized live dice digits,
-the actual combined SHA-256 and selected BIP39 entropy bytes. A short Python
-command hashes the exact serialized input bytes, and a second command converts
-the resulting entropy into words through Trezor's pinned library. Both commands
-were checked against application output for all five supported word counts.
-The v1 recipe is unchanged, and generation and audit serialization now share
-one implementation in `entropy_material`. Anyone with these reproduction inputs can recover
-the phrase, so they must be treated as a recovery backup and checked only on a
-trusted offline computer. The panel is cleared after wallet creation, when
-switching setup choices and on shutdown; Python/Qt memory erasure is not guaranteed.
+Anyone with these reproduction inputs can recover the phrase. They must be
+treated as a recovery backup and checked only on a trusted offline computer.
+The panel is cleared after wallet creation, when switching setup choices and
+on shutdown; Python/Qt memory erasure is not guaranteed.
 
 ## Remaining limits
 
