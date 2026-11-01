@@ -42,6 +42,13 @@ class ColdCoreRPC(CoreRPC):
         "walletprocesspsbt", "listdescriptors",
     })
 
+    def call(self, method, params=None, wallet=None, **kwargs):
+        try:
+            return super().call(method, params, wallet, **kwargs)
+        except CoreError as exc:
+            detail = re.sub(r"[xt]prv[1-9A-HJ-NP-Za-km-z]+", "[private key redacted]", str(exc))
+            raise CoreError(f"{method}: {detail}") from None
+
 
 class OfflineCore:
     """Run a private, no-P2P Core instance entirely inside a tmpfs directory."""
@@ -65,6 +72,23 @@ class OfflineCore:
             self.rpc.call("walletlock", wallet="cold-signer")
         except CoreError:
             raise ColdSetupError("Core could not confirm the wallet is locked. Close this signer before continuing.") from None
+
+    def _prepare_signer(self):
+        """Discard only a failed setup's private RAM wallet before retrying."""
+        if self.address_type is not None:
+            raise ColdSetupError("Close the current wallet before creating another.")
+        if self.directory is None:
+            raise ColdSetupError("The isolated Core session is not running.")
+        if "cold-signer" in self.rpc.call("listwallets"):
+            self.rpc.call("unloadwallet", ["cold-signer"])
+        path = self.directory / "wallets" / "cold-signer"
+        if path.is_symlink():
+            raise ColdSetupError("The temporary wallet path is unexpectedly a symbolic link.")
+        if path.exists():
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                raise ColdSetupError("Could not clear the failed wallet setup. Close this signer and retry.") from None
 
     @staticmethod
     def _check_sighashes(decoded):
@@ -225,6 +249,7 @@ class OfflineCore:
         created_wallet = False
         try:
             xprv = master_xprv(phrase, bip39_passphrase)
+            self._prepare_signer()
             self.rpc.call("createwallet", [name, False, True, wallet_passphrase or "", False, True, False, False])
             created_wallet = True
             if wallet_passphrase:
@@ -239,13 +264,16 @@ class OfflineCore:
             self.address_type = address_type
             return {
                 "address": address,
-                "descriptors": [item["desc"] for item in sorted(descriptors, key=lambda item: item["internal"]) if item["active"]],
+                "descriptors": [item["desc"] for item in sorted(
+                    (item for item in descriptors if item.get("active") is True),
+                    key=lambda item: item.get("internal", False),
+                )],
                 "address_info": address_info,
                 "wallet_name": name,
                 "encrypted": bool(wallet_passphrase),
             }
-        except CoreError:
-            raise ColdSetupError("Core could not derive and load the BIP39 wallet.") from None
+        except CoreError as exc:
+            raise ColdSetupError(f"Core wallet setup failed.\n\n{exc}") from None
         finally:
             # Minimize references; the helper process must exit after the user finishes.
             xprv = ""
@@ -271,6 +299,7 @@ class OfflineCore:
         created_wallet = False
         try:
             root_xprv = master_xprv(phrase, bip39_passphrase)
+            self._prepare_signer()
             self.rpc.call("createwallet", [name, False, True, wallet_passphrase or "", False, True, False, False])
             created_wallet = True
             if wallet_passphrase:
@@ -340,8 +369,8 @@ class OfflineCore:
                 "threshold": threshold,
                 "encrypted": bool(wallet_passphrase),
             }
-        except CoreError:
-            raise ColdSetupError("Core could not derive and import the BIP87 multisig wallet.") from None
+        except CoreError as exc:
+            raise ColdSetupError(f"Core multisig setup failed.\n\n{exc}") from None
         finally:
             root_xprv = ""
             if isinstance(account, dict):

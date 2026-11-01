@@ -64,7 +64,7 @@ class WalletService:
     def receive(self, name, label):
         params = {"label": label}
         active = [item["desc"] for item in self.rpc.call("listdescriptors", [False], wallet=name)["descriptors"]
-                  if item["active"] and not item["internal"]]
+                  if item.get("active") is True and not item.get("internal", False)]
         # Imported wallets can contain only Taproot or legacy descriptors while
         # Core's global default remains bech32. Use the imported type explicitly.
         if len(active) == 1:

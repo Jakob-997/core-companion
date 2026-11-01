@@ -2,6 +2,7 @@
 
 import base64
 import json
+import secrets
 import unicodedata
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +25,7 @@ from .offline_core import OfflineCore
 from .seed import (
     SeedError,
     entropy_from_sources,
+    entropy_commitment,
     final_word_candidates,
     phrase_from_entropy,
     validate_phrase,
@@ -59,6 +61,7 @@ class ColdSignerDialog(QDialog):
         self.setStyleSheet(stylesheet())
         self.core = None
         self.wallet_digest = None
+        self.os_entropy = None
         self.phrase = None
         self.words = []
         self.challenge = []
@@ -207,18 +210,24 @@ class ColdSignerDialog(QDialog):
 
     def _build_entropy_page(self):
         layout = self._card()
-        title = _label("Entropy fingerprint", False)
+        title = _label("Entropy commitment", False)
         title.setObjectName("Title")
         layout.addWidget(title)
         layout.addWidget(_label("SHA-256 of Core’s temporary wallet.dat", False))
-        layout.addWidget(_label("This digest is combined with fresh Linux randomness and optional dice rolls.", True))
+        layout.addWidget(_label("Inputs are fixed before you enter dice rolls.", True))
         self.fingerprint = _label("Preparing temporary wallet…")
         self.fingerprint.setObjectName("Hash")
         self.fingerprint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.fingerprint)
+        layout.addWidget(_label("Committed inputs · SHA-256 before dice", False))
+        self.entropy_commitment = _label("")
+        self.entropy_commitment.setObjectName("Hash")
+        self.entropy_commitment.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.entropy_commitment)
         audit = _label(
             "Audit: sha256sum /path/to/wallet.dat\n"
             "The original temporary file is deleted after hashing. The hash alone cannot reproduce the phrase.\n"
+            "Commitment = SHA256('Core Companion entropy commitment v1' + zero byte + wallet hash + OS randomness).\n"
             "Entropy = SHA256(domain || uint16be(32) || wallet hash || uint16be(32) || "
             "32 random OS bytes || uint32be(dice length) || ASCII dice), truncated to the selected BIP39 size.\n"
             "Domain: Core Companion BIP39 entropy v1 followed by a zero byte.", True
@@ -738,7 +747,7 @@ class ColdSignerDialog(QDialog):
         footer = QHBoxLayout()
         back = QPushButton("‹  Back")
         back.setObjectName("Quiet")
-        back.clicked.connect(lambda: self.stack.setCurrentIndex(4))
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(2 if self.phrase_source == "recover" else 4))
         footer.addWidget(back)
         footer.addStretch()
         proceed = QPushButton("Continue")
@@ -748,6 +757,11 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _choose_setup(self, choice):
+        self._reset_protection()
+        if choice != self.setup_choice:
+            self.wallet_digest = self.os_entropy = self.phrase = None
+            self.words.clear()
+            self.dice.clear()
         self.setup_choice = choice
         self.create_choice.setChecked(choice == "new")
         self.recover_choice.setChecked(choice == "recover")
@@ -953,7 +967,7 @@ class ColdSignerDialog(QDialog):
     def _toggle_bip39_fields(self, enabled):
         for widget in (self.bip39_passphrase1, self.bip39_passphrase2, self.bip39_show):
             widget.setEnabled(enabled)
-            widget.setVisible(enabled)
+            widget.setVisible(enabled and (widget is not self.bip39_passphrase2 or self.phrase_source != "recover"))
         if not enabled:
             self.bip39_passphrase1.clear()
             self.bip39_passphrase2.clear()
@@ -981,7 +995,7 @@ class ColdSignerDialog(QDialog):
         wallet_password = ""
         if self.use_bip39_passphrase.isChecked():
             first, second = self.bip39_passphrase1.text(), self.bip39_passphrase2.text()
-            if not first or first != second:
+            if not first or (self.phrase_source != "recover" and first != second):
                 QMessageBox.warning(self, "Check BIP39 passphrase", "Enter the same non-empty BIP39 passphrase twice.")
                 return None
             bip39_passphrase = first
@@ -995,16 +1009,35 @@ class ColdSignerDialog(QDialog):
         self.current_wallet_passphrase = wallet_password
         return True
 
+    def _reset_protection(self):
+        self.current_bip39_passphrase = ""
+        self.current_wallet_passphrase = ""
+        self.use_bip39_passphrase.setChecked(False)
+        self.encrypt_wallet.setChecked(False)
+        self.bip39_show.setChecked(False)
+        self.wallet_show.setChecked(False)
+        for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):
+            field.clear()
+
+    def _show_protection(self):
+        self._reset_protection()
+        self._toggle_bip39_fields(False)
+        self.stack.setCurrentIndex(17)
+
     def _start_new_wallet(self):
         if self.core is None:
             return
         try:
-            self.wallet_digest = self.core.create_entropy_wallet_hash()
+            if self.wallet_digest is None:
+                self.wallet_digest = self.core.create_entropy_wallet_hash()
+                self.os_entropy = secrets.token_bytes(32)
         except ColdSetupError as exc:
             QMessageBox.critical(self, "Temporary wallet failed", str(exc))
             return
         hex_hash = self.wallet_digest.hex()
         self.fingerprint.setText(" ".join(hex_hash[i:i + 8] for i in range(0, len(hex_hash), 8)))
+        commitment = entropy_commitment(self.wallet_digest, self.os_entropy).hex()
+        self.entropy_commitment.setText(" ".join(commitment[i:i + 8] for i in range(0, len(commitment), 8)))
         self.stack.setCurrentIndex(1)
 
     def _start_recovery(self):
@@ -1022,13 +1055,14 @@ class ColdSignerDialog(QDialog):
             self.reject()
 
     def _generate_phrase(self):
-        if self.wallet_digest is None:
+        if self.wallet_digest is None or self.os_entropy is None:
             return
         try:
             entropy = entropy_from_sources(
                 self.wallet_digest,
                 int(self.word_count.currentData()),
                 self.dice.text(),
+                os_entropy=self.os_entropy,
             )
             self.phrase = phrase_from_entropy(entropy)
         except SeedError as exc:
@@ -1097,7 +1131,7 @@ class ColdSignerDialog(QDialog):
             return
         self.words = self.phrase.split()
         self.phrase_source = "recover"
-        self._show_confirmation()
+        self._show_protection()
 
     def _show_confirmation(self):
         self.challenge = list(range(len(self.words)))
@@ -1128,7 +1162,7 @@ class ColdSignerDialog(QDialog):
             if entered != expected:
                 QMessageBox.warning(self, "Phrase doesn’t match", "One or more words are incorrect. Check your written phrase and try again.")
                 return
-        self.stack.setCurrentIndex(17)
+        self._show_protection()
 
     def _add_signer_fields(self, suggested_label):
         row = len(self.signer_fields)
@@ -1186,6 +1220,7 @@ class ColdSignerDialog(QDialog):
                 self.current_bip39_passphrase,
             )
         except (SeedError, ColdSetupError) as exc:
+            self._reset_protection()
             QMessageBox.critical(self, "Core wallet setup failed", str(exc))
             return
         self._show_complete(result, "Single-signature")
@@ -1224,6 +1259,7 @@ class ColdSignerDialog(QDialog):
                 self.own_signer_name.text().strip(),
             )
         except (SeedError, ColdSetupError) as exc:
+            self._reset_protection()
             QMessageBox.critical(self, "Core wallet setup failed", str(exc))
             return
         self._show_complete(result, f"{self.threshold.value()} of {len(signers) + 1} multisig · BIP87")
@@ -1233,6 +1269,7 @@ class ColdSignerDialog(QDialog):
         self.words.clear()
         self.recovery_text.clear()
         self.wallet_digest = None
+        self.os_entropy = None
         self.current_bip39_passphrase = ""
         self.current_wallet_passphrase = ""
         self.wallet_encrypted = result.get("encrypted") is True
@@ -1647,6 +1684,8 @@ class ColdSignerDialog(QDialog):
 
     def shutdown_core(self):
         self._stop_scanner()
+        self.os_entropy = None
+        self.wallet_digest = None
         for widget in (self.recovery_text,):
             widget.clear()
         for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):

@@ -50,6 +50,34 @@ RPC behavior in these checks was simulated: real Linux Core creation, signing,
 camera access, GPG release downloading, and network/swap restoration were not
 exercised end to end in this environment.
 
+## Follow-up validation: wallet setup
+
+Verified and ran the actual Linux Core 32.1 archive under Ubuntu/WSL, requiring
+the pinned signer threshold and archive checksum. Using only the public BIP39
+zero-entropy reference phrase in isolated RAM directories with Core peer
+networking disabled, checked native SegWit, Taproot, legacy and nested SegWit
+creation, encryption, BIP39 passphrase derivation, fresh receive addresses and
+retry after a partial wallet setup. Native SegWit matched the known BIP84
+reference address. Every review Core process was stopped and its RAM directory
+removed afterward; host networking and swap settings were not changed.
+
+This exposed unused root-key descriptor entries without `active`/`internal`
+fields. Both cold creation and online receiving now filter active entries
+before using those fields. Failed setup wallets are unloaded and removed from
+their private RAM directory before a retry; completed wallets are protected
+from this reset. Setup errors identify the failing RPC with extended private
+keys redacted.
+
+UI checks also cover fixed pre-dice input commitments, recovery without a
+second phrase-entry screen, one BIP39-passphrase entry on recovery, cleared
+password fields and hidden online wallet actions until a wallet is loaded.
+These follow-up checks do not establish end-to-end signing, camera access or
+host network/swap restoration.
+
+The displayed pre-dice commitment uses a separate domain from seed generation,
+so it does not reveal the seed entropy when no dice are entered. The actual
+wallet digest and OS bytes are fixed before dice entry and reused on Generate.
+
 ## Remaining limits
 
 - Python cannot guarantee erasure of seed strings. The separate signer process

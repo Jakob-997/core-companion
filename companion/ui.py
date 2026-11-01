@@ -357,6 +357,15 @@ class App(QMainWindow):
         self.sync_progress.setFixedHeight(8)
         sync_layout.addWidget(self.sync_progress)
         layout.addWidget(sync_card)
+        self.wallet_content = QWidget()
+        wallet_layout = QVBoxLayout(self.wallet_content)
+        wallet_layout.setContentsMargins(0, 0, 0, 0)
+        wallet_layout.setSpacing(10)
+        layout.addWidget(self.wallet_content, 1)
+        layout.addStretch()
+        layout = wallet_layout
+        self.wallet_content.hide()
+        self.wallet_picker.hide()
         kpis = QHBoxLayout()
         self.balance = self._kpi(kpis, "Balance", "— BTC")
         self.pending = self._kpi(kpis, "Unconfirmed", "— BTC")
@@ -1183,6 +1192,8 @@ class App(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _clear(self):
+        self.wallet_content.hide()
+        self.wallet_picker.hide()
         self.wallet_picker.blockSignals(True)
         self.wallet_picker.clear()
         self.wallet_picker.blockSignals(False)
@@ -1279,13 +1290,15 @@ class App(QMainWindow):
         if selected_wallet:
             self.wallet_picker.setCurrentText(selected_wallet)
         self.wallet_picker.blockSignals(False)
+        self.wallet_content.setVisible(bool(data["wallets"]))
+        self.wallet_picker.setVisible(bool(data["wallets"]))
         if data["wallets"]:
             self.refresh()
         else:
             self.online_name.setText("No watch-only wallet loaded")
             self.sync_label.setText("Core is connected")
             self.statusBar().showMessage(
-                "No watch-only wallet is loaded. Restore the cold signer’s export in Core, then reconnect."
+                "Import the public wallet QR from your cold signer."
             )
 
     def disconnect(self):

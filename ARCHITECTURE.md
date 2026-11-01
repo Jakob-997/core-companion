@@ -103,10 +103,13 @@ bounded, and a stale managed cookie no longer causes an endless reconnect loop.
    directory on a verified tmpfs mount.
 2. Create a throwaway descriptor wallet, unload it, and hash its closed
    `wallet.dat` with SHA-256. The displayed fingerprint is that file hash.
-3. On Generate, obtain 32 fresh bytes from the Linux system CSPRNG and combine
-   them with the wallet digest and optional dice digits using the documented,
-   length-prefixed domain-separated SHA-256 in `seed.py`. Truncate only to a
-   standard BIP39 entropy size selected by the user.
+3. Before dice entry, obtain 32 fresh bytes from the Linux system CSPRNG. Display
+   the wallet-file hash and SHA-256 of a separate commitment domain followed by
+   the wallet digest and OS bytes. This binds the inputs without displaying the
+   no-dice seed entropy. Retain those same original inputs in signer memory. On
+   Generate, combine those fixed inputs with the dice digits using the documented,
+   length-prefixed domain-separated SHA-256 in `seed.py`; no new randomness is
+   drawn after dice entry. Truncate only to the selected standard BIP39 size.
 4. Encode the entropy and validate/recover English BIP39 words with Trezor's
    `python-mnemonic`. `to_seed()` applies the optional BIP39 passphrase;
    `to_hd_master_key()` produces the BIP32 root xprv. Bitcoin Core imports that
