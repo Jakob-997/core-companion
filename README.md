@@ -45,8 +45,9 @@ Downloading Core alone does not start networking, so it is safe to download it
 before setting up a cold signer. The verified binary is also available to the
 cold signer.
 
-The cold signer button is under **Tools**. Select the installed `bitcoind`
-executable. Cold mode requires Linux, Core 32.1+, a RAM-backed `/dev/shm`,
+The cold signer reuses Companion's verified `bitcoind` to start its separate,
+offline Core process. No file selection or online-node connection is needed.
+Cold mode requires Linux, Core 32.1+, a RAM-backed `/dev/shm`,
 `pkexec`, `iproute2`, and the system swap tools. If NetworkManager is installed,
 `nmcli` and `busctl` are used to turn it off and restore its prior setting.
 Camera scanning additionally needs the Linux `zbarcam` utility, commonly

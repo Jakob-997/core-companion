@@ -18,7 +18,7 @@ from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
-    QFormLayout, QFileDialog, QPlainTextEdit, QFrame, QProgressBar, QToolTip,
+    QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip,
     QSizePolicy)
 from PySide6.QtWidgets import QMessageBox
 import qrcode
@@ -115,6 +115,7 @@ class App(QMainWindow):
         self.core_download_cancelled = False
         self.core_cookie_path = None
         self.connection_fallback = False
+        self.pending_cold_start = False
         self.managed_core_process = None
         self.node_start_timer = QTimer(self)
         self.node_start_timer.setInterval(1200)
@@ -854,7 +855,16 @@ class App(QMainWindow):
         if self.core_download_process is not None:
             self.statusBar().showMessage("Finish or cancel the Core download before starting cold storage.")
             return
+        if not self._installed_core_binary():
+            self._set_core_status("Download and verify Bitcoin Core first", "error")
+            self.statusBar().showMessage("Download and verify Core on Welcome before starting cold storage.")
+            self.tabs.setCurrentIndex(0)
+            return
         if self.busy:
+            if self.service is None:
+                self.pending_cold_start = True
+                self.statusBar().showMessage("Preparing cold storage…")
+                return
             self.statusBar().showMessage("Wait for the local Core connection check to finish, then continue to cold storage.")
             return
         if self.cold_process and self.cold_process.state() != QProcess.ProcessState.NotRunning:
@@ -874,11 +884,11 @@ class App(QMainWindow):
             return
         if self.cold_process and self.cold_process.state() != QProcess.ProcessState.NotRunning:
             return
-        suggested = str(self._installed_core_binary() or shutil.which("bitcoind") or "")
-        bitcoind, _ = QFileDialog.getOpenFileName(
-            self, "Select Bitcoin Core bitcoind", suggested, "Bitcoin Core daemon (bitcoind);;All files (*)"
-        )
+        bitcoind = self._installed_core_binary()
         if not bitcoind:
+            self._set_core_status("Download and verify Bitcoin Core first", "error")
+            self.statusBar().showMessage("Download and verify Core on Welcome before starting cold storage.")
+            self.tabs.setCurrentIndex(0)
             return
         session = ColdSystemSession(disable_networking=not self.dev_keep_network)
         self.cold_session = session
@@ -913,7 +923,7 @@ class App(QMainWindow):
         entry = Path(__file__).resolve().parent.parent / "run.py"
         process.setProgram(sys.executable)
         arguments = [
-            str(entry), "--cold-helper", "--bitcoind", str(Path(bitcoind).resolve()),
+            str(entry), "--cold-helper", "--bitcoind", str(bitcoind.resolve()),
             "--session-id", self.cold_session_id,
         ]
         if self.dev_keep_network:
@@ -1051,6 +1061,12 @@ class App(QMainWindow):
             return
         self.busy = False
         self.wallet_picker.setEnabled(True)
+        if self.pending_cold_start:
+            self.pending_cold_start = False
+            self.connection_fallback = False
+            self.service = None
+            QTimer.singleShot(0, self.start_cold_signer)
+            return
         if error:
             if self.connection_fallback:
                 self.connection_fallback = False
