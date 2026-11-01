@@ -66,20 +66,17 @@ def managed_node_dir():
     return companion_data_dir() / "bitcoin-node"
 
 
-def centered_page(width=930, top=20, bottom=16, name="Page"):
+def page_layout(top=20, bottom=16, name="Page"):
     page = QWidget()
     page.setObjectName(name)
-    shell = QHBoxLayout(page)
+    shell = QVBoxLayout(page)
     shell.setContentsMargins(0, 0, 0, 0)
-    shell.addStretch(1)
     content = QWidget()
     content.setObjectName("PageContent")
-    content.setMaximumWidth(width)
     content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
     shell.addWidget(content, 1)
-    shell.addStretch(1)
     layout = QVBoxLayout(content)
-    layout.setContentsMargins(0, top, 0, bottom)
+    layout.setContentsMargins(30, top, 30, bottom)
     layout.setSpacing(14)
     return page, layout
 
@@ -88,8 +85,8 @@ class App(QMainWindow):
         super().__init__()
         self.setObjectName("OnlineNode")
         self.setWindowTitle("Core Companion")
-        self.resize(1060, 760)
-        self.setMinimumSize(900, 650)
+        self.resize(1280, 850)
+        self.setMinimumSize(980, 680)
         self.dark_mode = False
         self.help_mode = False
         self.mode_choice = None
@@ -195,7 +192,7 @@ class App(QMainWindow):
         self.tabs.setCurrentIndex(0)
 
     def _welcome(self):
-        page, layout = centered_page(770, 32, 26, "OnboardingPage")
+        page, layout = page_layout(30, 24, "OnboardingPage")
         layout.addWidget(label("Welcome", "Eyebrow"))
         layout.addWidget(label("Bitcoin Core", "Title"))
         intro = label(
@@ -255,7 +252,7 @@ class App(QMainWindow):
         self.core_status.update()
 
     def _mode_page(self):
-        page, layout = centered_page(780, 30, 26, "OnboardingPage")
+        page, layout = page_layout(28, 24, "OnboardingPage")
         layout.addWidget(label("Choose a wallet mode", "Title"))
         choices = QVBoxLayout()
         choices.setSpacing(0)
@@ -290,7 +287,7 @@ class App(QMainWindow):
         self.tabs.addTab(page, "Mode")
 
     def _cold_network_page(self):
-        page, layout = centered_page(770, 32, 26, "OnboardingPage")
+        page, layout = page_layout(30, 24, "OnboardingPage")
         layout.addWidget(label("Cold storage", "Eyebrow"))
         layout.addWidget(label(
             "Cold signer test mode" if self.dev_keep_network else "Keep this computer offline",
@@ -331,7 +328,7 @@ class App(QMainWindow):
         self.tabs.setCurrentIndex(self.cold_notice_previous)
 
     def _online_home(self):
-        page, layout = centered_page(930, 20, 18, "OnlinePage")
+        page, layout = page_layout(18, 16, "OnlinePage")
         layout.setSpacing(10)
         title_row = QHBoxLayout()
         title_row.addWidget(label("Watch-only wallet", "Eyebrow"))
@@ -475,7 +472,7 @@ class App(QMainWindow):
         return super().eventFilter(watched, event)
 
     def page(self, title):
-        widget, layout = centered_page(930, 20, 16)
+        widget, layout = page_layout(18, 16)
         self.tabs.addTab(widget, title)
         return layout
 
@@ -1377,7 +1374,7 @@ class App(QMainWindow):
     def show_text(self, title, content):
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
-        dialog.resize(750, 480)
+        dialog.resize(900, 600)
         layout = QVBoxLayout(dialog)
         text = QPlainTextEdit(content)
         text.setReadOnly(True)

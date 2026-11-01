@@ -51,8 +51,8 @@ class ColdSignerDialog(QDialog):
         super().__init__(parent)
         self.setObjectName("ColdSigner")
         self.setWindowTitle("Core Companion — Cold storage")
-        self.resize(940, 700)
-        self.setMinimumSize(820, 620)
+        self.resize(1280, 850)
+        self.setMinimumSize(980, 680)
         self.dark_mode = False
         self.setStyleSheet(stylesheet())
         self.core = None
@@ -148,33 +148,27 @@ class ColdSignerDialog(QDialog):
     def _card(self):
         page = QWidget()
         page.setObjectName("Page")
-        shell = QHBoxLayout(page)
-        shell.setContentsMargins(0, 0, 0, 0)
-        shell.addStretch(1)
+        shell = QVBoxLayout(page)
+        shell.setContentsMargins(30, 0, 30, 0)
         card = QWidget()
         card.setObjectName("Card")
-        card.setMaximumWidth(840)
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         shell.addWidget(card, 1)
-        shell.addStretch(1)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(12)
         self.stack.addWidget(page)
         return layout
 
-    def _page(self, width=820):
+    def _page(self):
         page = QWidget()
         page.setObjectName("Page")
-        shell = QHBoxLayout(page)
-        shell.setContentsMargins(0, 0, 0, 0)
-        shell.addStretch(1)
+        shell = QVBoxLayout(page)
+        shell.setContentsMargins(30, 0, 30, 0)
         content = QWidget()
         content.setObjectName("PageContent")
-        content.setMaximumWidth(width)
         content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         shell.addWidget(content, 1)
-        shell.addStretch(1)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 16, 0, 16)
         layout.setSpacing(14)
@@ -383,7 +377,7 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_complete_page(self):
-        layout = self._page(820)
+        layout = self._page()
         identity = QFrame()
         identity.setObjectName("IdentityPanel")
         identity_row = QHBoxLayout(identity)
@@ -603,7 +597,7 @@ class ColdSignerDialog(QDialog):
         layout.addStretch()
 
     def _build_setup_page(self):
-        layout = self._page(780)
+        layout = self._page()
         heading = _label("Wallet setup", False)
         heading.setObjectName("Title")
         layout.addWidget(heading)
@@ -632,7 +626,7 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_type_page(self):
-        layout = self._page(780)
+        layout = self._page()
         heading = _label("Choose wallet type", False)
         heading.setObjectName("Title")
         layout.addWidget(heading)
