@@ -88,7 +88,7 @@ class ColdSignerDialog(QDialog):
         header = QHBoxLayout()
         mark = _label("₿")
         mark.setObjectName("Mark")
-        mark.setFixedSize(36, 36)
+        mark.setFixedSize(34, 34)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.addWidget(mark)
         brand = _label("Core Companion", False)
@@ -103,6 +103,10 @@ class ColdSignerDialog(QDialog):
         self.theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         header.addWidget(self.theme_button)
         root.addLayout(header)
+        divider = QFrame()
+        divider.setObjectName("HeaderDivider")
+        divider.setFixedHeight(1)
+        root.addWidget(divider)
         self.stack = QStackedWidget()
         if self.dev_keep_network:
             notice = _label(

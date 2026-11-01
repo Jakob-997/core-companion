@@ -15,7 +15,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QRect
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-    QHBoxLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
+    QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
     QFormLayout, QFileDialog, QPlainTextEdit, QFrame, QProgressBar, QToolTip,
     QSizePolicy)
@@ -119,7 +119,7 @@ class App(QMainWindow):
         root.setSpacing(8)
         toolbar = QHBoxLayout()
         mark = label("₿", "Mark")
-        mark.setFixedSize(28, 28)
+        mark.setFixedSize(34, 34)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         toolbar.addWidget(mark)
         toolbar.addWidget(label("Core Companion", "Brand"))
@@ -133,6 +133,10 @@ class App(QMainWindow):
         toolbar.addWidget(self.theme_button)
         toolbar.addWidget(IconButton("node", "Connection", self.show_connection))
         root.addLayout(toolbar)
+        divider = QFrame()
+        divider.setObjectName("HeaderDivider")
+        divider.setFixedHeight(1)
+        root.addWidget(divider)
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setDrawBase(False)
@@ -293,8 +297,9 @@ class App(QMainWindow):
         self.pending = self._kpi(kpis, "Unconfirmed", "— BTC")
         self.immature = self._kpi(kpis, "Wallet", "Watch-only")
         layout.addLayout(kpis)
-        actions = QVBoxLayout()
-        actions.setSpacing(8)
+        actions = QGridLayout()
+        actions.setHorizontalSpacing(9)
+        actions.setVerticalSpacing(9)
         receive_action = ActionRow(
             "↓", "Receive Bitcoin", "", primary=True,
             tooltip="Create an address and QR code using Bitcoin Core.",
@@ -315,8 +320,8 @@ class App(QMainWindow):
             tooltip="Inspect a PSBT or start a separate cold signer session.",
         )
         tools_action.clicked.connect(lambda: self.tabs.setCurrentIndex(6))
-        for action in (receive_action, send_action, addresses_action, tools_action):
-            actions.addWidget(action)
+        for index, action in enumerate((receive_action, send_action, addresses_action, tools_action)):
+            actions.addWidget(action, index // 2, index % 2)
         layout.addLayout(actions)
         activity_header = QHBoxLayout()
         activity_header.addWidget(label("Recent activity", "Heading"))
@@ -411,6 +416,8 @@ class App(QMainWindow):
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setFrameShape(QFrame.Shape.NoFrame)
+        table.setShowGrid(False)
         return table
 
     def _history(self):
