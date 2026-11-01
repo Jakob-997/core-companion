@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+dist/
+build/
+preview*.png
+*.cookie
+.cookie
+*.dat
+*.sqlite
+*.log

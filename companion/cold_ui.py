@@ -1,0 +1,1659 @@
+"""Short-lived Linux UI for creating or recovering a Core signing wallet."""
+
+import secrets
+import base64
+import shutil
+import unicodedata
+from decimal import Decimal
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+import qrcode
+from PySide6.QtCore import Qt, QRect, QProcess, QEvent
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QPlainTextEdit,
+    QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QToolTip,
+)
+
+from .linux_cold import ColdSetupError
+from .offline_core import OfflineCore
+from .seed import (
+    SeedError,
+    entropy_from_sources,
+    final_word_candidates,
+    phrase_from_entropy,
+    validate_phrase,
+)
+from .theme import stylesheet
+from .widgets import ActionRow
+
+
+def _label(text, muted=False):
+    widget = QLabel(text)
+    widget.setWordWrap(True)
+    if muted:
+        widget.setObjectName("Muted")
+    return widget
+
+
+def _clear_layout(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget():
+            item.widget().deleteLater()
+
+
+class ColdSignerDialog(QDialog):
+    def __init__(self, bitcoind, session_id, parent=None, *, dev_keep_network=False):
+        super().__init__(parent)
+        self.setObjectName("ColdSigner")
+        self.setWindowTitle("Core Companion — Cold storage")
+        self.resize(940, 700)
+        self.setMinimumSize(820, 620)
+        self.dark_mode = False
+        self.setStyleSheet(stylesheet())
+        self.core = None
+        self.wallet_digest = None
+        self.phrase = None
+        self.words = []
+        self.challenge = []
+        self.wallet_mode = "single"
+        self.setup_choice = None
+        self.type_choice = None
+        self.phrase_source = "create"
+        self.current_bip39_passphrase = ""
+        self.current_wallet_passphrase = ""
+        self.recovery_prefix = None
+        self.session_id = session_id
+        self.dev_keep_network = bool(dev_keep_network)
+        self.wallet_encrypted = False
+        self.reviewed_psbt = None
+        self.reviewed_txid = None
+        self.scanner = None
+        self.scanner_buffer = bytearray()
+        self.scanner_target_field = None
+        self.help_mode = False
+        self.wallet_display_name = "Cold storage"
+        self.wallet_fingerprint = ""
+        self.address_records = []
+        self.active_address = None
+        self.help_targets = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 12, 20, 10)
+        root.setSpacing(9)
+        header = QHBoxLayout()
+        mark = _label("₿")
+        mark.setObjectName("Mark")
+        mark.setFixedSize(36, 36)
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(mark)
+        brand = _label("Core Companion", False)
+        brand.setObjectName("Brand")
+        header.addWidget(brand)
+        header.addStretch()
+        self.help_button = QPushButton("ⓘ  Help")
+        self.help_button.setObjectName("Quiet")
+        self.help_button.setToolTip("Turn on instant explanations. Hover over a control to see what it does.")
+        self.help_button.clicked.connect(self._toggle_help_mode)
+        header.addWidget(self.help_button)
+        self.theme_button = QPushButton("◐  Dark mode")
+        self.theme_button.setObjectName("Quiet")
+        self.theme_button.clicked.connect(self._toggle_theme)
+        header.addWidget(self.theme_button)
+        root.addLayout(header)
+        self.stack = QStackedWidget()
+        if self.dev_keep_network:
+            notice = _label(
+                "DEVELOPMENT MODE · Host networking stays on. Core peer networking stays off. Use test wallets only.",
+                False,
+            )
+            notice.setObjectName("DevNotice")
+            root.addWidget(notice)
+        root.addWidget(self.stack, 1)
+        self._build_start_page()
+        self._build_entropy_page()
+        self._build_recovery_page()
+        self._build_phrase_page()
+        self._build_confirm_page()
+        self._build_multisig_page()
+        self._build_complete_page()
+        self._build_psbt_page()
+        self._build_verify_address_page()
+        self._build_scan_page()
+        self._build_addresses_page()
+        self._build_address_detail_page()
+        self._build_tools_page()
+        self._build_policy_page()
+        self._build_settings_page()
+        self._build_setup_page()
+        self._build_type_page()
+        self._build_protection_page()
+        self.status_left = _label("Cold signer · offline", True)
+        self.status_right = _label("Setup", True)
+        status = QHBoxLayout()
+        status.addWidget(self.status_left)
+        status.addStretch()
+        status.addWidget(self.status_right)
+        root.addLayout(status)
+        self._install_help_targets()
+        self.stack.setCurrentIndex(15)
+        self._open_core(bitcoind)
+
+    def _card(self):
+        card = QWidget()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        self.stack.addWidget(card)
+        return layout
+
+    def _build_start_page(self):
+        layout = self._card()
+        title = _label("Wallet details", False)
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        self.wallet_name_input = QLineEdit()
+        self.wallet_name_input.setPlaceholderText("Wallet name")
+        layout.addWidget(self.wallet_name_input)
+        self.wallet_type = QComboBox()
+        self.wallet_type.addItem("Single-signature", "single")
+        self.wallet_type.addItem("Multisig · BIP87", "multisig")
+        self.wallet_type.hide()
+        form = QFormLayout()
+        self.address_type_form = form
+        self.address_type = QComboBox()
+        for title, code in (
+            ("Native SegWit", "bech32"),
+            ("Taproot", "bech32m"),
+            ("Nested SegWit", "p2sh-segwit"),
+            ("Legacy", "legacy"),
+        ):
+            self.address_type.addItem(title, code)
+        form.addRow("Address type", self.address_type)
+        layout.addLayout(form)
+
+        footer = QHBoxLayout()
+        back = QPushButton("‹  Back")
+        back.setObjectName("Quiet")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(16))
+        footer.addWidget(back)
+        footer.addStretch()
+        continue_button = QPushButton("Continue  →")
+        continue_button.setObjectName("Primary")
+        continue_button.clicked.connect(self._continue_wallet_setup)
+        footer.addWidget(continue_button)
+        layout.addLayout(footer)
+
+    def _build_entropy_page(self):
+        layout = self._card()
+        title = _label("Entropy fingerprint", False)
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        layout.addWidget(_label("SHA-256 of Core’s temporary wallet.dat", False))
+        layout.addWidget(_label("This digest is combined with fresh Linux randomness and optional dice rolls.", True))
+        self.fingerprint = _label("Preparing temporary wallet…")
+        self.fingerprint.setObjectName("Hash")
+        self.fingerprint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.fingerprint)
+        form = QFormLayout()
+        self.dice = QLineEdit()
+        self.dice.setPlaceholderText("Optional · enter rolls from 1 to 6")
+        form.addRow("Dice rolls", self.dice)
+        self.word_count = QComboBox()
+        for count in (24, 21, 18, 15, 12):
+            self.word_count.addItem(f"{count} words", count)
+        form.addRow("Recovery phrase", self.word_count)
+        layout.addLayout(form)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        back = QPushButton("Back")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        footer.addWidget(back)
+        footer.addStretch()
+        generate = QPushButton("Generate recovery phrase")
+        generate.setObjectName("Primary")
+        generate.clicked.connect(self._generate_phrase)
+        footer.addWidget(generate)
+        layout.addLayout(footer)
+
+    def _build_recovery_page(self):
+        layout = self._card()
+        title = _label("Recover from a BIP39 phrase", False)
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        layout.addWidget(_label(
+            "Enter the full phrase, or leave the final word blank. The checksum can allow more than one final word; "
+            "choose the one written on your backup.", True
+        ))
+        self.recovery_count = QComboBox()
+        for count in (12, 15, 18, 21, 24):
+            self.recovery_count.addItem(f"{count} words", count)
+        layout.addWidget(self.recovery_count)
+        self.recovery_text = QPlainTextEdit()
+        self.recovery_text.setPlaceholderText("Enter the words in order, separated by spaces")
+        self.recovery_text.setMaximumHeight(135)
+        layout.addWidget(self.recovery_text)
+        self.recovery_text.textChanged.connect(self._clear_recovery_candidates)
+        self.recovery_hint = _label("", True)
+        layout.addWidget(self.recovery_hint)
+        self.final_word = QComboBox()
+        self.final_word.hide()
+        layout.addWidget(self.final_word)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        back = QPushButton("Back")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        footer.addWidget(back)
+        footer.addStretch()
+        continue_button = QPushButton("Continue")
+        continue_button.setObjectName("Primary")
+        continue_button.clicked.connect(self._continue_recovery)
+        footer.addWidget(continue_button)
+        layout.addLayout(footer)
+
+    def _build_phrase_page(self):
+        layout = self._card()
+        title = _label("Write down your recovery phrase", False)
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        layout.addWidget(_label("Keep these words private and in order. You’ll confirm three of them next.", True))
+        self.word_grid = QGridLayout()
+        self.word_labels = []
+        layout.addLayout(self.word_grid, 1)
+        footer = QHBoxLayout()
+        back = QPushButton("Back")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+        footer.addWidget(back)
+        footer.addStretch()
+        next_button = QPushButton("I wrote it down")
+        next_button.setObjectName("Primary")
+        next_button.clicked.connect(self._show_confirmation)
+        footer.addWidget(next_button)
+        layout.addLayout(footer)
+
+    def _build_confirm_page(self):
+        layout = self._card()
+        title = _label("Confirm your phrase", False)
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        layout.addWidget(_label("Enter the requested words exactly as they appear on your backup.", True))
+        self.challenge_form = QFormLayout()
+        self.challenge_fields = []
+        layout.addLayout(self.challenge_form)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        self.confirm_back = QPushButton("Back")
+        self.confirm_back.clicked.connect(self._back_from_confirmation)
+        footer.addWidget(self.confirm_back)
+        footer.addStretch()
+        continue_button = QPushButton("Continue")
+        continue_button.setObjectName("Primary")
+        continue_button.clicked.connect(self._confirm_phrase)
+        footer.addWidget(continue_button)
+        layout.addLayout(footer)
+
+    def _build_multisig_page(self):
+        card = QWidget()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(card)
+        self.stack.addWidget(scroll)
+        title = _label("Multisig setup", False)
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        layout.addWidget(_label(
+            "Set the signing threshold, then add each other signer’s account xpub with its BIP87 origin. These should come from "
+            "m/87h/0h/0h and look like [fingerprint/87h/0h/0h]xpub…", True
+        ))
+        self.threshold = QSpinBox()
+        self.threshold.setMinimum(1)
+        self.threshold.setMaximum(3)
+        self.threshold.setValue(2)
+        self.signer_count_label = _label("3 signers total", True)
+        self.own_signer_name = QLineEdit("This signer")
+        form = QFormLayout()
+        form.addRow("This signer", self.own_signer_name)
+        form.addRow("Required signatures", self.threshold)
+        form.addRow("Signers", self.signer_count_label)
+        layout.addLayout(form)
+        self.signer_grid = QGridLayout()
+        self.signer_grid.setColumnStretch(2, 1)
+        layout.addLayout(self.signer_grid)
+        self.signer_fields = []
+        for index in range(2):
+            self._add_signer_fields(f"Signer {index + 2}")
+        signer_buttons = QHBoxLayout()
+        add_signer = QPushButton("+ Add signer")
+        add_signer.clicked.connect(self._add_signer)
+        signer_buttons.addWidget(add_signer)
+        remove_signer = QPushButton("− Remove last")
+        remove_signer.clicked.connect(self._remove_signer)
+        signer_buttons.addWidget(remove_signer)
+        signer_buttons.addStretch()
+        layout.addLayout(signer_buttons)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        back = QPushButton("Back")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        footer.addWidget(back)
+        footer.addStretch()
+        continue_button = QPushButton("Continue")
+        continue_button.setObjectName("Primary")
+        continue_button.clicked.connect(self._continue_multisig_setup)
+        footer.addWidget(continue_button)
+        layout.addLayout(footer)
+
+    def _build_complete_page(self):
+        layout = self._card()
+        identity = QFrame()
+        identity.setObjectName("IdentityPanel")
+        identity_row = QHBoxLayout(identity)
+        identity_row.setContentsMargins(14, 12, 12, 12)
+        identity_row.setSpacing(14)
+        self.identity_mark = QWidget()
+        self.identity_mark.setObjectName("IdentityMark")
+        self.identity_mark.setFixedSize(58, 58)
+        self.identity_grid = QGridLayout(self.identity_mark)
+        self.identity_grid.setContentsMargins(4, 4, 4, 4)
+        self.identity_grid.setSpacing(2)
+        self.identity_tiles = []
+        for index in range(25):
+            tile = QLabel()
+            tile.setObjectName("IdentityTile")
+            self.identity_grid.addWidget(tile, index // 5, index % 5)
+            self.identity_tiles.append(tile)
+        identity_row.addWidget(self.identity_mark)
+        identity_copy = QVBoxLayout()
+        identity_copy.setSpacing(3)
+        self.identity_name = _label("Cold storage", False)
+        self.identity_name.setObjectName("IdentityName")
+        identity_copy.addWidget(self.identity_name)
+        self.identity_policy = _label("Single-signature · cold signer", True)
+        identity_copy.addWidget(self.identity_policy)
+        self.identity_fingerprint = _label("Signer · unavailable", True)
+        identity_copy.addWidget(self.identity_fingerprint)
+        identity_row.addLayout(identity_copy, 1)
+        change = QPushButton("↔")
+        change.setObjectName("Quiet")
+        change.setToolTip("Close this temporary signer session before opening another wallet.")
+        change.clicked.connect(self._change_wallet)
+        identity_row.addWidget(change, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(identity)
+
+        heading = _label("Choose an action", False)
+        heading.setObjectName("Title")
+        layout.addWidget(heading)
+        actions = QVBoxLayout()
+        actions.setSpacing(9)
+        scan = ActionRow("▦", "Scan QR", "Verify a receive address or review a transaction to sign.", primary=True)
+        scan.clicked.connect(lambda: self.stack.setCurrentIndex(9))
+        addresses = ActionRow("▣", "View wallet addresses", "Browse saved addresses and labels.")
+        addresses.clicked.connect(self._open_addresses)
+        tools = ActionRow("⚙", "Tools & Settings", "Export a watch-only wallet, view policy, and manage settings.")
+        tools.clicked.connect(lambda: self.stack.setCurrentIndex(12))
+        actions.addWidget(scan)
+        actions.addWidget(addresses)
+        actions.addWidget(tools)
+        layout.addLayout(actions)
+        layout.addStretch(1)
+
+    def _build_scan_page(self):
+        layout = self._card()
+        self._add_back_heading(layout, "Scan QR code", "Scan a receive address or a PSBT to review and sign.", 6)
+        self.scan_target = QLabel("▦")
+        self.scan_target.setObjectName("ScanTarget")
+        self.scan_target.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scan_target.setMinimumHeight(210)
+        layout.addWidget(self.scan_target)
+        self.scan_payload = QLineEdit()
+        self.scan_payload.setPlaceholderText("Scanned QR data appears here")
+        self.scan_payload.returnPressed.connect(self._process_scanned_payload)
+        layout.addWidget(self.scan_payload)
+        controls = QHBoxLayout()
+        start = QPushButton("Start QR scanner")
+        start.setObjectName("Primary")
+        start.clicked.connect(lambda: self._start_qr_scanner(self.scan_payload))
+        controls.addWidget(start)
+        check = QPushButton("Continue")
+        check.clicked.connect(self._process_scanned_payload)
+        controls.addWidget(check)
+        controls.addStretch()
+        layout.addLayout(controls)
+        layout.addStretch()
+
+    def _build_addresses_page(self):
+        layout = self._card()
+        header = QHBoxLayout()
+        title = _label("Wallet addresses", False)
+        title.setObjectName("Title")
+        header.addWidget(title)
+        header.addStretch()
+        generate = QPushButton("Generate address")
+        generate.setObjectName("Primary")
+        generate.clicked.connect(self._generate_receive_address)
+        header.addWidget(generate)
+        layout.addLayout(header)
+        layout.addWidget(_label("Addresses generated or confirmed on this signer.", True))
+        self.address_table = QTableWidget(0, 3)
+        self.address_table.setHorizontalHeaderLabels(["LABEL", "ADDRESS", "USED"])
+        self.address_table.verticalHeader().hide()
+        self.address_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.address_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.address_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.address_table.setShowGrid(False)
+        self.address_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.address_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.address_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.address_table.cellDoubleClicked.connect(self._open_address_from_row)
+        layout.addWidget(self.address_table, 1)
+        layout.addWidget(_label("Double-click an address to view its QR code or edit its label.", True))
+        self._add_back_button(layout, 6, "Back to wallet")
+
+    def _build_address_detail_page(self):
+        layout = self._card()
+        self.address_detail_title = _label("Wallet address", False)
+        self.address_detail_title.setObjectName("Title")
+        back = QPushButton("‹  Back to addresses")
+        back.setObjectName("Quiet")
+        back.clicked.connect(self._open_addresses)
+        layout.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.address_detail_title)
+        detail = QHBoxLayout()
+        self.address_qr = QLabel()
+        self.address_qr.setObjectName("QR")
+        self.address_qr.setFixedSize(190, 190)
+        self.address_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        detail.addWidget(self.address_qr, 0, Qt.AlignmentFlag.AlignTop)
+        fields = QVBoxLayout()
+        fields.addWidget(_label("ADDRESS", False))
+        self.address_detail_value = QLineEdit()
+        self.address_detail_value.setReadOnly(True)
+        self.address_detail_value.setFont(QFont("monospace", 9))
+        fields.addWidget(self.address_detail_value)
+        fields.addWidget(_label("LABEL · OPTIONAL", False))
+        self.address_detail_label = QLineEdit()
+        self.address_detail_label.setPlaceholderText("e.g. Long-term savings")
+        fields.addWidget(self.address_detail_label)
+        self.address_used_status = _label("✓  Used on this signer", True)
+        fields.addWidget(self.address_used_status)
+        fields.addStretch()
+        detail.addLayout(fields, 1)
+        layout.addLayout(detail)
+        done = QPushButton("Done")
+        done.setObjectName("Primary")
+        done.clicked.connect(self._save_address_detail)
+        layout.addWidget(done, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addStretch()
+
+    def _build_tools_page(self):
+        layout = self._card()
+        self._add_back_heading(layout, "Tools & Settings", "Wallet policy, exports, and preferences.", 6)
+        actions = QVBoxLayout()
+        actions.setSpacing(9)
+        policy = ActionRow("⌘", "Wallet policy", "Review the wallet identity, signer keys, and public descriptors.")
+        policy.clicked.connect(lambda: self.stack.setCurrentIndex(13))
+        export = ActionRow("⇧", "Export watch-only wallet", "Export public wallet data for use on the online node.")
+        export.clicked.connect(self._export_watchonly_wallet)
+        settings = ActionRow("⚙", "Settings", "Change appearance and view cold-signer session details.")
+        settings.clicked.connect(lambda: self.stack.setCurrentIndex(14))
+        for action in (policy, export, settings):
+            actions.addWidget(action)
+        layout.addLayout(actions)
+        layout.addStretch()
+
+    def _build_policy_page(self):
+        layout = self._card()
+        self._add_back_heading(layout, "Wallet policy", "Public wallet data supplied and checked by Bitcoin Core.", 12)
+        self.policy_identity = _label("")
+        layout.addWidget(self.policy_identity)
+        self.signer_map = _label("")
+        self.signer_map.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.signer_map)
+        layout.addWidget(_label("PUBLIC DESCRIPTORS", False))
+        self.descriptors = QPlainTextEdit()
+        self.descriptors.setReadOnly(True)
+        self.descriptors.setMaximumHeight(250)
+        layout.addWidget(self.descriptors, 1)
+
+    def _build_settings_page(self):
+        layout = self._card()
+        self._add_back_heading(layout, "Settings", "", 12)
+        appearance = QHBoxLayout()
+        appearance.addWidget(_label("Appearance", False))
+        appearance.addStretch()
+        theme = QPushButton("◐  Dark mode")
+        theme.clicked.connect(self._toggle_theme)
+        appearance.addWidget(theme)
+        layout.addLayout(appearance)
+        layout.addWidget(_label("Cold signer session", False))
+        self.session_details = _label("Networking and swap are disabled for this session.", True)
+        layout.addWidget(self.session_details)
+        layout.addWidget(_label("The signing wallet is held in RAM by Bitcoin Core. Closing the session stops Core and removes its temporary wallet files.", True))
+        layout.addStretch()
+
+    def _build_setup_page(self):
+        layout = self._card()
+        heading = _label("Wallet setup", False)
+        heading.setObjectName("Title")
+        layout.addWidget(heading)
+        choices = QHBoxLayout()
+        choices.setSpacing(14)
+        self.create_choice = QPushButton("＋\n\nCreate a new wallet")
+        self.create_choice.setObjectName("SetupChoice")
+        self.create_choice.setCheckable(True)
+        self.create_choice.setMinimumHeight(170)
+        self.create_choice.clicked.connect(lambda: self._choose_setup("new"))
+        self.recover_choice = QPushButton("↻\n\nUse an existing wallet")
+        self.recover_choice.setObjectName("SetupChoice")
+        self.recover_choice.setCheckable(True)
+        self.recover_choice.setMinimumHeight(170)
+        self.recover_choice.clicked.connect(lambda: self._choose_setup("recover"))
+        choices.addWidget(self.create_choice, 1)
+        choices.addWidget(self.recover_choice, 1)
+        layout.addLayout(choices)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        back = QPushButton("‹  Back")
+        back.setObjectName("Quiet")
+        back.clicked.connect(self._finish)
+        footer.addWidget(back)
+        footer.addStretch()
+        self.setup_continue = QPushButton("Continue  →")
+        self.setup_continue.setObjectName("Primary")
+        self.setup_continue.setEnabled(False)
+        self.setup_continue.clicked.connect(lambda: self.stack.setCurrentIndex(16))
+        footer.addWidget(self.setup_continue)
+        layout.addLayout(footer)
+
+    def _build_type_page(self):
+        layout = self._card()
+        heading = _label("Choose wallet type", False)
+        heading.setObjectName("Title")
+        layout.addWidget(heading)
+        choices = QHBoxLayout()
+        choices.setSpacing(14)
+        self.single_choice = QPushButton("◉\n\nSingle-signature")
+        self.single_choice.setObjectName("SetupChoice")
+        self.single_choice.setCheckable(True)
+        self.single_choice.setMinimumHeight(170)
+        self.single_choice.clicked.connect(lambda: self._choose_type("single"))
+        self.multi_choice = QPushButton("⌘\n\nMultisig\nBIP87")
+        self.multi_choice.setObjectName("SetupChoice")
+        self.multi_choice.setCheckable(True)
+        self.multi_choice.setMinimumHeight(170)
+        self.multi_choice.clicked.connect(lambda: self._choose_type("multisig"))
+        choices.addWidget(self.single_choice, 1)
+        choices.addWidget(self.multi_choice, 1)
+        layout.addLayout(choices)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        back = QPushButton("‹  Back")
+        back.setObjectName("Quiet")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(15))
+        footer.addWidget(back)
+        footer.addStretch()
+        self.type_continue = QPushButton("Continue  →")
+        self.type_continue.setObjectName("Primary")
+        self.type_continue.setEnabled(False)
+        self.type_continue.clicked.connect(self._continue_type_choice)
+        footer.addWidget(self.type_continue)
+        layout.addLayout(footer)
+
+    def _build_protection_page(self):
+        layout = self._card()
+        heading = _label("Wallet protection", False)
+        heading.setObjectName("Title")
+        layout.addWidget(heading)
+        protection = QGroupBox("Optional protection")
+        protection.setCheckable(True)
+        protection.setChecked(False)
+        content = QVBoxLayout(protection)
+        content.setSpacing(8)
+        self.use_bip39_passphrase = QCheckBox("Use a BIP39 passphrase")
+        self.use_bip39_passphrase.setToolTip("An additional secret that creates a different wallet from the same recovery phrase.")
+        content.addWidget(self.use_bip39_passphrase)
+        self.bip39_passphrase1 = QLineEdit()
+        self.bip39_passphrase1.setPlaceholderText("BIP39 passphrase")
+        self.bip39_passphrase1.setEchoMode(QLineEdit.EchoMode.Password)
+        self.bip39_passphrase2 = QLineEdit()
+        self.bip39_passphrase2.setPlaceholderText("Confirm BIP39 passphrase")
+        self.bip39_passphrase2.setEchoMode(QLineEdit.EchoMode.Password)
+        self.bip39_show = QCheckBox("Show BIP39 passphrase")
+        content.addWidget(self.bip39_passphrase1)
+        content.addWidget(self.bip39_passphrase2)
+        content.addWidget(self.bip39_show)
+        self.use_bip39_passphrase.toggled.connect(self._toggle_bip39_fields)
+        self.bip39_show.toggled.connect(self._toggle_bip39_visibility)
+        self._toggle_bip39_fields(False)
+
+        self.encrypt_wallet = QCheckBox("Encrypt wallet")
+        self.encrypt_wallet.setToolTip("Encrypt the temporary Bitcoin Core wallet file for this session.")
+        content.addWidget(self.encrypt_wallet)
+        self.wallet_password1 = QLineEdit()
+        self.wallet_password1.setPlaceholderText("Password")
+        self.wallet_password1.setEchoMode(QLineEdit.EchoMode.Password)
+        self.wallet_password2 = QLineEdit()
+        self.wallet_password2.setPlaceholderText("Confirm password")
+        self.wallet_password2.setEchoMode(QLineEdit.EchoMode.Password)
+        self.wallet_show = QCheckBox("Show password")
+        content.addWidget(self.wallet_password1)
+        content.addWidget(self.wallet_password2)
+        content.addWidget(self.wallet_show)
+        self.encrypt_wallet.toggled.connect(self._toggle_wallet_fields)
+        self.wallet_show.toggled.connect(self._toggle_wallet_visibility)
+        self._toggle_wallet_fields(False)
+        protection.toggled.connect(self._toggle_protection_group)
+        layout.addWidget(protection)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        back = QPushButton("‹  Back")
+        back.setObjectName("Quiet")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(4))
+        footer.addWidget(back)
+        footer.addStretch()
+        proceed = QPushButton("Continue")
+        proceed.setObjectName("Primary")
+        proceed.clicked.connect(self._finish_wallet_protection)
+        footer.addWidget(proceed)
+        layout.addLayout(footer)
+
+    def _choose_setup(self, choice):
+        self.setup_choice = choice
+        self.create_choice.setChecked(choice == "new")
+        self.recover_choice.setChecked(choice == "recover")
+        self.setup_continue.setEnabled(True)
+
+    def _choose_type(self, choice):
+        self.type_choice = choice
+        self.single_choice.setChecked(choice == "single")
+        self.multi_choice.setChecked(choice == "multisig")
+        self.type_continue.setEnabled(True)
+
+    def _continue_type_choice(self):
+        if self.type_choice is None:
+            return
+        self.wallet_mode = self.type_choice
+        self.wallet_type.setCurrentIndex(0 if self.type_choice == "single" else 1)
+        self.address_type.setVisible(self.type_choice == "single")
+        address_label = self.address_type_form.labelForField(self.address_type)
+        if address_label:
+            address_label.setVisible(self.type_choice == "single")
+        self.stack.setCurrentIndex(0)
+
+    def _continue_wallet_setup(self):
+        if self.setup_choice == "new":
+            if self.wallet_mode == "multisig":
+                self.stack.setCurrentIndex(5)
+            else:
+                self._start_new_wallet()
+        elif self.setup_choice == "recover":
+            if self.wallet_mode == "multisig":
+                self.stack.setCurrentIndex(5)
+            else:
+                self._start_recovery()
+
+    def _finish_wallet_protection(self):
+        if not self._read_protection_options():
+            return
+        if self.wallet_mode == "multisig":
+            self._create_multisig()
+        else:
+            self._create_single_signature()
+
+    def _continue_multisig_setup(self):
+        seen = set()
+        for name, key, _scan in self.signer_fields:
+            signer_name = name.text().strip()
+            signer_key = key.text().strip()
+            if not signer_name or not signer_key:
+                QMessageBox.warning(self, "Complete signer details", "Enter a label and account xpub for every signer.")
+                return
+            if signer_name.casefold() in seen or signer_name.casefold() == self.own_signer_name.text().strip().casefold():
+                QMessageBox.warning(self, "Signer labels", "Each signer needs a different label.")
+                return
+            seen.add(signer_name.casefold())
+        if self.setup_choice == "new":
+            self._start_new_wallet()
+        elif self.setup_choice == "recover":
+            self._start_recovery()
+
+    def _add_back_button(self, layout, target, text):
+        back = QPushButton("‹  " + text)
+        back.setObjectName("Quiet")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(target))
+        layout.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+
+    def _add_back_heading(self, layout, title, description, target):
+        self._add_back_button(layout, target, "Back")
+        heading = _label(title, False)
+        heading.setObjectName("Title")
+        layout.addWidget(heading)
+        if description:
+            layout.addWidget(_label(description, True))
+
+    def _install_help_targets(self):
+        descriptions = {
+            "Create new wallet": "Create a signer wallet with a new BIP39 recovery phrase.",
+            "Use existing wallet": "Recover a signer from its BIP39 recovery phrase.",
+            "Generate recovery phrase": "Generate a recovery phrase from Bitcoin Core wallet data, Linux randomness, and optional dice rolls.",
+            "Review and sign a transaction": "Inspect a PSBT with Bitcoin Core before signing. This signer never broadcasts.",
+            "Scan QR code": "Scan a receive address for ownership verification, or scan a PSBT to review it.",
+            "Generate address": "Ask Bitcoin Core for a new address from this wallet. It is added to the used-address list.",
+            "Export watch-only wallet": "Export public wallet data for the online node. Private keys are not included.",
+        }
+        for widget in self.findChildren(QWidget):
+            if isinstance(widget, (QPushButton, QLineEdit, QComboBox, QSpinBox, QCheckBox, QPlainTextEdit, ActionRow)):
+                if isinstance(widget, QPushButton):
+                    label_text = widget.text()
+                elif hasattr(widget, "placeholderText"):
+                    label_text = widget.placeholderText()
+                else:
+                    label_text = ""
+                if not widget.toolTip():
+                    widget.setToolTip(descriptions.get(label_text, f"{label_text or 'This setting'} on the current screen."))
+                self.help_targets.append(widget)
+                widget.installEventFilter(self)
+
+    def _build_psbt_page(self):
+        layout = self._card()
+        title = _label("Review and sign a transaction", False)
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        layout.addWidget(_label(
+            "Import a PSBT, verify every recipient, amount, fee and change output, then sign. "
+            "Input amounts and fee come from the PSBT, not a local blockchain. This signer never broadcasts.", True
+        ))
+        self.psbt_input = QPlainTextEdit()
+        self.psbt_input.setPlaceholderText("Paste a base64 PSBT, import a file, or scan one QR code")
+        self.psbt_input.setMaximumHeight(115)
+        self.psbt_input.textChanged.connect(self._invalidate_psbt_review)
+        layout.addWidget(self.psbt_input)
+        controls = QHBoxLayout()
+        scan = QPushButton("Scan QR with zbarcam")
+        scan.clicked.connect(self._start_qr_scanner)
+        controls.addWidget(scan)
+        load = QPushButton("Import file…")
+        load.clicked.connect(self._load_psbt_file)
+        controls.addWidget(load)
+        review = QPushButton("Review transaction")
+        review.setObjectName("Primary")
+        review.clicked.connect(self._review_psbt)
+        controls.addWidget(review)
+        controls.addStretch()
+        layout.addLayout(controls)
+        self.psbt_review = QPlainTextEdit()
+        self.psbt_review.setReadOnly(True)
+        self.psbt_review.setPlaceholderText("Transaction details from Bitcoin Core will appear here.")
+        self.psbt_review.setMaximumHeight(175)
+        layout.addWidget(self.psbt_review)
+        password_row = QHBoxLayout()
+        self.signer_password = QLineEdit()
+        self.signer_password.setPlaceholderText("Wallet password, if encrypted")
+        self.signer_password.setEchoMode(QLineEdit.EchoMode.Password)
+        password_row.addWidget(self.signer_password)
+        self.show_signer_password = QCheckBox("Show")
+        self.show_signer_password.toggled.connect(
+            lambda visible: self.signer_password.setEchoMode(
+                QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+            )
+        )
+        password_row.addWidget(self.show_signer_password)
+        layout.addLayout(password_row)
+        self.sign_button = QPushButton("Sign reviewed transaction")
+        self.sign_button.setObjectName("Primary")
+        self.sign_button.setEnabled(False)
+        self.sign_button.clicked.connect(self._sign_reviewed_psbt)
+        layout.addWidget(self.sign_button, 0, Qt.AlignmentFlag.AlignRight)
+        signed_row = QHBoxLayout()
+        self.signed_qr = QLabel()
+        self.signed_qr.setFixedSize(205, 205)
+        self.signed_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.signed_qr.hide()
+        signed_row.addWidget(self.signed_qr, 0, Qt.AlignmentFlag.AlignTop)
+        signed_details = QVBoxLayout()
+        self.signed_status = _label("")
+        signed_details.addWidget(self.signed_status)
+        self.signed_psbt = QPlainTextEdit()
+        self.signed_psbt.setReadOnly(True)
+        self.signed_psbt.setPlaceholderText("Signed PSBT will appear here.")
+        self.signed_psbt.setMaximumHeight(110)
+        signed_details.addWidget(self.signed_psbt)
+        save = QPushButton("Save signed PSBT…")
+        save.clicked.connect(self._save_signed_psbt)
+        signed_details.addWidget(save, 0, Qt.AlignmentFlag.AlignLeft)
+        signed_row.addLayout(signed_details, 1)
+        layout.addLayout(signed_row)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        back = QPushButton("Back to wallet")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(6))
+        footer.addWidget(back)
+        footer.addStretch()
+        layout.addLayout(footer)
+
+    def _build_verify_address_page(self):
+        layout = self._card()
+        title = _label("Verify a receive address", False)
+        title.setObjectName("Title")
+        layout.addWidget(title)
+        layout.addWidget(_label("Confirm this address belongs to the selected wallet.", True))
+        self.verify_address_input = QLineEdit()
+        self.verify_address_input.setPlaceholderText("Bitcoin address or bitcoin: URI")
+        self.verify_address_input.textChanged.connect(self._clear_address_result)
+        layout.addWidget(self.verify_address_input)
+        controls = QHBoxLayout()
+        scan = QPushButton("Scan QR with zbarcam")
+        scan.clicked.connect(lambda: self._start_qr_scanner(self.verify_address_input))
+        controls.addWidget(scan)
+        verify = QPushButton("Verify address")
+        verify.setObjectName("Primary")
+        verify.clicked.connect(self._verify_receive_address)
+        controls.addWidget(verify)
+        controls.addStretch()
+        layout.addLayout(controls)
+        self.verify_result = _label("")
+        self.verify_result.setObjectName("Verification")
+        layout.addWidget(self.verify_result)
+        self.verified_address_label = QLineEdit()
+        self.verified_address_label.setPlaceholderText("Label · optional")
+        self.verified_address_label.setEnabled(False)
+        layout.addWidget(self.verified_address_label)
+        self.address_used_checkbox = QCheckBox("Mark this address as used")
+        self.address_used_checkbox.setEnabled(False)
+        layout.addWidget(self.address_used_checkbox)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        back = QPushButton("Back to wallet")
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(9))
+        footer.addWidget(back)
+        footer.addStretch()
+        done = QPushButton("Done")
+        done.setObjectName("Primary")
+        done.clicked.connect(self._save_verified_address)
+        footer.addWidget(done)
+        layout.addLayout(footer)
+
+    def _toggle_bip39_fields(self, enabled):
+        for widget in (self.bip39_passphrase1, self.bip39_passphrase2, self.bip39_show):
+            widget.setEnabled(enabled)
+        if not enabled:
+            self.bip39_passphrase1.clear()
+            self.bip39_passphrase2.clear()
+
+    def _toggle_protection_group(self, enabled):
+        if not enabled:
+            self.use_bip39_passphrase.setChecked(False)
+            self.encrypt_wallet.setChecked(False)
+            self.bip39_passphrase1.clear()
+            self.bip39_passphrase2.clear()
+            self.wallet_password1.clear()
+            self.wallet_password2.clear()
+
+    def _toggle_bip39_visibility(self, visible):
+        mode = QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        self.bip39_passphrase1.setEchoMode(mode)
+        self.bip39_passphrase2.setEchoMode(mode)
+
+    def _toggle_wallet_fields(self, enabled):
+        for widget in (self.wallet_password1, self.wallet_password2, self.wallet_show):
+            widget.setEnabled(enabled)
+        if not enabled:
+            self.wallet_password1.clear()
+            self.wallet_password2.clear()
+
+    def _toggle_wallet_visibility(self, visible):
+        mode = QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        self.wallet_password1.setEchoMode(mode)
+        self.wallet_password2.setEchoMode(mode)
+
+    def _read_protection_options(self):
+        bip39_passphrase = ""
+        wallet_password = ""
+        if self.use_bip39_passphrase.isChecked():
+            first, second = self.bip39_passphrase1.text(), self.bip39_passphrase2.text()
+            if not first or first != second:
+                QMessageBox.warning(self, "Check BIP39 passphrase", "Enter the same non-empty BIP39 passphrase twice.")
+                return None
+            bip39_passphrase = first
+        if self.encrypt_wallet.isChecked():
+            first, second = self.wallet_password1.text(), self.wallet_password2.text()
+            if len(first) < 10 or first != second:
+                QMessageBox.warning(self, "Check wallet password", "Enter the same wallet password twice. Use at least 10 characters.")
+                return None
+            wallet_password = first
+        self.current_bip39_passphrase = bip39_passphrase
+        self.current_wallet_passphrase = wallet_password
+        return True
+
+    def _start_new_wallet(self):
+        if self.core is None:
+            return
+        self.wallet_mode = self.wallet_type.currentData()
+        try:
+            self.wallet_digest = self.core.create_entropy_wallet_hash()
+        except ColdSetupError as exc:
+            QMessageBox.critical(self, "Temporary wallet failed", str(exc))
+            return
+        hex_hash = self.wallet_digest.hex()
+        self.fingerprint.setText(" ".join(hex_hash[i:i + 8] for i in range(0, len(hex_hash), 8)))
+        self.stack.setCurrentIndex(1)
+
+    def _start_recovery(self):
+        if self.core is None:
+            return
+        self.wallet_mode = self.wallet_type.currentData()
+        self._clear_recovery_candidates()
+        self.recovery_text.clear()
+        self.stack.setCurrentIndex(2)
+
+    def _open_core(self, bitcoind):
+        try:
+            self.core = OfflineCore(bitcoind, self.session_id, dev_keep_network=self.dev_keep_network).start()
+        except (ColdSetupError, OSError) as exc:
+            QMessageBox.critical(self, "Cold signer setup failed", str(exc))
+            self.reject()
+
+    def _generate_phrase(self):
+        if self.wallet_digest is None:
+            return
+        try:
+            entropy = entropy_from_sources(
+                self.wallet_digest,
+                int(self.word_count.currentData()),
+                self.dice.text(),
+            )
+            self.phrase = phrase_from_entropy(entropy)
+        except SeedError as exc:
+            QMessageBox.warning(self, "Check the dice rolls", str(exc))
+            return
+        self.words = self.phrase.split()
+        self.phrase_source = "create"
+        self.dice.clear()
+        self._render_words()
+        self.stack.setCurrentIndex(3)
+
+    def _render_words(self):
+        _clear_layout(self.word_grid)
+        self.word_labels = []
+        rows = (len(self.words) + 1) // 2
+        for index, word in enumerate(self.words):
+            column = 0 if index < rows else 1
+            row = index if column == 0 else index - rows
+            item = QLabel(f"{index + 1:02d}   {word}")
+            item.setFont(QFont("monospace", 12))
+            item.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+            self.word_grid.addWidget(item, row, column)
+            self.word_labels.append(item)
+
+    def _clear_recovery_candidates(self):
+        self.recovery_prefix = None
+        self.recovery_hint.clear()
+        self.final_word.clear()
+        self.final_word.hide()
+
+    def _continue_recovery(self):
+        count = int(self.recovery_count.currentData())
+        tokens = " ".join(self.recovery_text.toPlainText().split()).split()
+        if len(tokens) == count:
+            try:
+                self.phrase = validate_phrase(" ".join(tokens))
+            except SeedError as exc:
+                QMessageBox.warning(self, "Phrase checksum failed", str(exc))
+                return
+        elif len(tokens) == count - 1:
+            prefix = " ".join(tokens)
+            if self.recovery_prefix != prefix:
+                try:
+                    candidates = final_word_candidates(prefix)
+                except SeedError as exc:
+                    QMessageBox.warning(self, "Recovery phrase", str(exc))
+                    return
+                if not candidates:
+                    QMessageBox.warning(self, "No checksum match", "No final word matches this phrase. Check the words and order.")
+                    return
+                self.final_word.clear()
+                self.final_word.addItems(candidates)
+                self.final_word.show()
+                self.recovery_prefix = prefix
+                self.recovery_hint.setText(
+                    f"{len(candidates)} checksum-valid final words. Choose the final word from your backup, then continue again."
+                )
+                return
+            self.phrase = validate_phrase(prefix + " " + self.final_word.currentText())
+        else:
+            QMessageBox.warning(
+                self,
+                "Recovery phrase length",
+                f"Enter {count} words, or enter the first {count - 1} and choose the final word.",
+            )
+            return
+        self.words = self.phrase.split()
+        self.phrase_source = "recover"
+        self._show_confirmation()
+
+    def _show_confirmation(self):
+        self.challenge = sorted(secrets.SystemRandom().sample(range(len(self.words)), 3))
+        _clear_layout(self.challenge_form)
+        self.challenge_fields = []
+        for index in self.challenge:
+            field = QLineEdit()
+            field.setPlaceholderText(f"Word {index + 1}")
+            self.challenge_form.addRow(f"Word {index + 1}", field)
+            self.challenge_fields.append(field)
+        for item in self.word_labels:
+            item.clear()
+        self.stack.setCurrentIndex(4)
+
+    def _back_from_confirmation(self):
+        if self.phrase_source == "recover":
+            self.stack.setCurrentIndex(2)
+        else:
+            self._render_words()
+            self.stack.setCurrentIndex(3)
+
+    def _confirm_phrase(self):
+        if not self.phrase:
+            return
+        for position, field in zip(self.challenge, self.challenge_fields):
+            entered = unicodedata.normalize("NFKD", field.text().strip()).casefold()
+            expected = unicodedata.normalize("NFKD", self.words[position]).casefold()
+            if entered != expected:
+                QMessageBox.warning(self, "Phrase doesn’t match", "One or more words are incorrect. Check your written phrase and try again.")
+                return
+        self.stack.setCurrentIndex(17)
+
+    def _add_signer_fields(self, suggested_label):
+        row = len(self.signer_fields)
+        name = QLineEdit(suggested_label)
+        name.setPlaceholderText("Signer label")
+        key = QLineEdit()
+        key.setPlaceholderText("[fingerprint/87h/0h/0h]xpub…")
+        key.setFont(QFont("monospace", 9))
+        scan = QPushButton("Scan")
+        scan.clicked.connect(lambda checked=False, field=key: self._start_qr_scanner(field))
+        self.signer_grid.addWidget(QLabel(f"External {row + 1}"), row, 0)
+        self.signer_grid.addWidget(name, row, 1)
+        self.signer_grid.addWidget(key, row, 2)
+        self.signer_grid.addWidget(scan, row, 3)
+        self.signer_fields.append((name, key, scan))
+        for widget, tip in (
+            (name, "A short label to identify this signer in the wallet policy."),
+            (key, "The signer’s BIP87 account xpub, including its fingerprint and derivation origin."),
+            (scan, "Scan this signer’s public account key QR."),
+        ):
+            widget.setToolTip(tip)
+            widget.installEventFilter(self)
+        self._sync_threshold()
+
+    def _add_signer(self):
+        if len(self.signer_fields) >= 19:
+            return
+        self._add_signer_fields(f"Signer {len(self.signer_fields) + 2}")
+
+    def _remove_signer(self):
+        if len(self.signer_fields) <= 1:
+            return
+        name, key, scan = self.signer_fields.pop()
+        for widget in (name, key, scan):
+            self.signer_grid.removeWidget(widget)
+            widget.deleteLater()
+        label_item = self.signer_grid.itemAtPosition(len(self.signer_fields), 0)
+        if label_item and label_item.widget():
+            label_item.widget().deleteLater()
+        self._sync_threshold()
+
+    def _sync_threshold(self):
+        total = len(self.signer_fields) + 1
+        self.threshold.setMaximum(total)
+        if self.threshold.value() > total:
+            self.threshold.setValue(total)
+        self.signer_count_label.setText(f"{total} signers total")
+
+    def _create_single_signature(self):
+        try:
+            result = self.core.create_single_sig_wallet(
+                self.phrase,
+                self.address_type.currentData(),
+                self.current_wallet_passphrase,
+                self.current_bip39_passphrase,
+            )
+        except (SeedError, ColdSetupError) as exc:
+            QMessageBox.critical(self, "Core wallet setup failed", str(exc))
+            return
+        self._show_complete(result, "Single-signature")
+
+    def _create_multisig(self):
+        signers = []
+        own_label = self.own_signer_name.text().strip()
+        if not own_label:
+            QMessageBox.warning(self, "Signer label", "Enter a label for this signer.")
+            return
+        seen_labels = {own_label.casefold()}
+        for name, key, _scan in self.signer_fields:
+            signer_label = name.text().strip()
+            signer_key = key.text().strip()
+            if not signer_label or not signer_key:
+                QMessageBox.warning(self, "Complete signer details", "Enter a label and BIP87 account xpub for every other signer.")
+                return
+            if signer_label.casefold() in seen_labels:
+                QMessageBox.warning(self, "Signer labels", "Each signer needs a different label.")
+                return
+            seen_labels.add(signer_label.casefold())
+            signers.append({"label": signer_label, "key": signer_key})
+        try:
+            result = self.core.create_multisig_wallet(
+                self.phrase,
+                self.threshold.value(),
+                signers,
+                self.current_wallet_passphrase,
+                self.current_bip39_passphrase,
+                own_label,
+            )
+        except (SeedError, ColdSetupError) as exc:
+            QMessageBox.critical(self, "Core wallet setup failed", str(exc))
+            return
+        self._show_complete(result, f"{self.threshold.value()} of {len(signers) + 1} multisig · BIP87")
+
+    def _show_complete(self, result, wallet_type):
+        self.phrase = None
+        self.words.clear()
+        self.recovery_text.clear()
+        self.wallet_digest = None
+        self.current_bip39_passphrase = ""
+        self.current_wallet_passphrase = ""
+        self.wallet_encrypted = result.get("encrypted") is True
+        self.signer_password.setEnabled(self.wallet_encrypted)
+        self.show_signer_password.setEnabled(self.wallet_encrypted)
+        for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):
+            field.clear()
+        for field in self.challenge_fields:
+            field.clear()
+        self.descriptors.setPlainText("\n".join(result["descriptors"]))
+        self.wallet_display_name = self.wallet_name_input.text().strip() or "Cold signer"
+        self.wallet_fingerprint = str(result.get("address_info", {}).get("hdmasterfingerprint", "")).upper()
+        own_key = result.get("own_account_key", "")
+        if not self.wallet_fingerprint and own_key.startswith("[") and "/" in own_key:
+            self.wallet_fingerprint = own_key[1:9].upper()
+        self.identity_name.setText(self.wallet_display_name)
+        self.identity_policy.setText(f"{wallet_type} · cold signer")
+        self.identity_fingerprint.setText(
+            f"Signer · {self.wallet_fingerprint}" if self.wallet_fingerprint else "Signer fingerprint unavailable from Core"
+        )
+        self.policy_identity.setText(
+            f"{self.wallet_display_name}  ·  {wallet_type}\n"
+            + (f"Signer fingerprint · {self.wallet_fingerprint}" if self.wallet_fingerprint else "Signer fingerprint unavailable from Core")
+        )
+        self.status_left.setText(f"{self.wallet_display_name} · {wallet_type}")
+        self.status_right.setText(f"Signer {self.wallet_fingerprint}" if self.wallet_fingerprint else "Cold signer · offline")
+        self._update_identity_mark()
+        signer_map = result.get("signers", [])
+        if signer_map:
+            lines = ["SIGNERS"]
+            for index, item in enumerate(signer_map, 1):
+                fingerprint = item["key"][1:9] if item.get("key", "").startswith("[") else ""
+                lines.append(f"{index}. {item['label']}  ·  {fingerprint}")
+            signer_text = "\n".join(lines)
+        else:
+            signer_text = "Single-signature · one signer"
+        if own_key:
+            signer_text += "\n\nYour BIP87 account key\n" + own_key
+        self.signer_map.setText(signer_text)
+        self.wallet_type_summary = wallet_type
+        self.stack.setCurrentIndex(6)
+
+    def _update_identity_mark(self):
+        fingerprint = self.wallet_fingerprint or "00000000"
+        try:
+            bits = f"{int(fingerprint, 16):032b}"[-25:]
+        except ValueError:
+            bits = "0" * 25
+        for index, tile in enumerate(self.identity_tiles):
+            tile.setProperty("lit", bits[index] == "1")
+            tile.style().unpolish(tile)
+            tile.style().polish(tile)
+
+    def _change_wallet(self):
+        answer = QMessageBox.question(
+            self,
+            "Close cold signer",
+            "This temporary session contains one signer wallet. Close it before opening another wallet?",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Close,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Close:
+            self._finish()
+
+    def _toggle_help_mode(self):
+        self.help_mode = not self.help_mode
+        self.help_button.setText("ⓘ  Help on" if self.help_mode else "ⓘ  Help")
+        self.help_button.setProperty("active", self.help_mode)
+        self.help_button.style().unpolish(self.help_button)
+        self.help_button.style().polish(self.help_button)
+
+    def _toggle_theme(self):
+        self.dark_mode = not self.dark_mode
+        self.setStyleSheet(stylesheet(self.dark_mode))
+        self.theme_button.setText("☼  Light mode" if self.dark_mode else "◐  Dark mode")
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Enter and self.help_mode and watched.toolTip():
+            point = watched.mapToGlobal(watched.rect().bottomLeft())
+            QToolTip.showText(point, watched.toolTip(), watched)
+        elif event.type() == QEvent.Type.Leave and self.help_mode:
+            QToolTip.hideText()
+        return super().eventFilter(watched, event)
+
+    def _open_addresses(self):
+        self._refresh_address_table()
+        self.stack.setCurrentIndex(10)
+
+    def _refresh_address_table(self):
+        self.address_table.setRowCount(len(self.address_records))
+        for row, record in enumerate(self.address_records):
+            label_item = QTableWidgetItem(record.get("label") or "Unlabeled")
+            address_item = QTableWidgetItem(record["address"])
+            address_item.setFont(QFont("monospace", 9))
+            used_item = QTableWidgetItem("✓" if record.get("used") else "—")
+            for item in (label_item, address_item, used_item):
+                item.setData(Qt.ItemDataRole.UserRole, record["address"])
+            self.address_table.setItem(row, 0, label_item)
+            self.address_table.setItem(row, 1, address_item)
+            self.address_table.setItem(row, 2, used_item)
+
+    def _generate_receive_address(self):
+        if self.core is None:
+            return
+        try:
+            result = self.core.new_receive_address()
+        except ColdSetupError as exc:
+            QMessageBox.warning(self, "Address generation failed", str(exc))
+            return
+        record = {"address": result["address"], "label": "", "used": True}
+        self.address_records = [item for item in self.address_records if item["address"] != record["address"]]
+        self.address_records.insert(0, record)
+        self._show_address_detail(record)
+
+    def _open_address_from_row(self, row, _column):
+        item = self.address_table.item(row, 1)
+        if not item:
+            return
+        address = item.data(Qt.ItemDataRole.UserRole)
+        record = next((entry for entry in self.address_records if entry["address"] == address), None)
+        if record:
+            self._show_address_detail(record)
+
+    def _show_address_detail(self, record):
+        self.active_address = record["address"]
+        self.address_detail_title.setText(record.get("label") or "Wallet address")
+        self.address_detail_value.setText(record["address"])
+        self.address_detail_label.setText(record.get("label", ""))
+        self.address_used_status.setText("✓  Used on this signer" if record.get("used") else "Not marked used")
+        self.address_qr.setPixmap(self._qr_pixmap(record["address"], size=190))
+        self.stack.setCurrentIndex(11)
+
+    def _save_address_detail(self):
+        record = next((entry for entry in self.address_records if entry["address"] == self.active_address), None)
+        if not record or self.core is None:
+            return
+        label = self.address_detail_label.text().strip()
+        try:
+            self.core.set_address_label(record["address"], label)
+        except ColdSetupError as exc:
+            QMessageBox.warning(self, "Could not save label", str(exc))
+            return
+        record["label"] = label
+        self._open_addresses()
+
+    def _save_verified_address(self):
+        address = self.verify_address_input.text().strip()
+        if not address or self.verify_result.property("verified") is not True:
+            self.stack.setCurrentIndex(9)
+            return
+        if self.address_used_checkbox.isChecked():
+            record = next((entry for entry in self.address_records if entry["address"] == address), None)
+            if record is None:
+                record = {"address": address, "label": "", "used": True}
+                self.address_records.insert(0, record)
+            record["used"] = True
+            record["label"] = self.verified_address_label.text().strip()
+            try:
+                self.core.set_address_label(address, record["label"])
+            except ColdSetupError as exc:
+                QMessageBox.warning(self, "Could not save address", str(exc))
+                return
+        self.verify_address_input.clear()
+        self.verified_address_label.clear()
+        self.address_used_checkbox.setChecked(False)
+        self.stack.setCurrentIndex(6)
+
+    def _invalidate_psbt_review(self):
+        self.reviewed_psbt = None
+        self.reviewed_txid = None
+        self.sign_button.setEnabled(False)
+        self.psbt_review.clear()
+        self.signed_psbt.clear()
+        self.signed_status.clear()
+        self.signed_qr.clear()
+        self.signed_qr.hide()
+
+    def _load_psbt_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import a PSBT", "", "PSBT or text files (*.psbt *.txt);;All files (*)")
+        if not path:
+            return
+        try:
+            raw = Path(path).read_bytes()
+            if len(raw) > 2 * 1024 * 1024:
+                raise ValueError("The selected file is larger than 2 MiB.")
+            if raw.startswith(b"psbt\xff"):
+                text = base64.b64encode(raw).decode("ascii")
+            else:
+                text = raw.decode("ascii").strip()
+            if len(text) > 2 * 1024 * 1024:
+                raise ValueError("The encoded PSBT is larger than 2 MiB.")
+        except (OSError, UnicodeError, ValueError) as exc:
+            QMessageBox.warning(self, "Could not import PSBT", str(exc))
+            return
+        self.psbt_input.setPlainText(text)
+
+    def _start_qr_scanner(self, target_field=None):
+        if self.scanner:
+            return
+        executable = shutil.which("zbarcam")
+        if not executable:
+            QMessageBox.information(
+                self,
+                "QR scanner unavailable",
+                "Install the Linux zbarcam utility (commonly provided by zbar-tools), then try again.",
+            )
+            return
+        self.scanner_buffer.clear()
+        self.scanner_target_field = target_field
+        process = QProcess(self)
+        self.scanner = process
+        process.setProgram(executable)
+        process.setArguments(["--quiet", "--raw"])
+        process.readyReadStandardOutput.connect(self._scanner_data)
+        process.errorOccurred.connect(self._scanner_error)
+        process.start()
+
+    def _scanner_data(self):
+        if not self.scanner:
+            return
+        self.scanner_buffer.extend(bytes(self.scanner.readAllStandardOutput()))
+        if len(self.scanner_buffer) > 8192:
+            process, self.scanner = self.scanner, None
+            process.kill()
+            QMessageBox.warning(self, "QR payload too large", "This prototype accepts one QR payload up to 8 KiB.")
+            return
+        if b"\n" not in self.scanner_buffer:
+            return
+        payload = bytes(self.scanner_buffer).splitlines()[0].strip()
+        process, self.scanner = self.scanner, None
+        process.terminate()
+        process.deleteLater()
+        try:
+            text = payload.decode("ascii")
+        except UnicodeDecodeError:
+            QMessageBox.warning(self, "Unsupported QR payload", "This screen can’t use the scanned QR data.")
+            return
+        target_field, self.scanner_target_field = self.scanner_target_field, None
+        if target_field is not None:
+            target_field.setText(text)
+            if target_field is self.verify_address_input:
+                self._verify_receive_address()
+            elif target_field is self.scan_payload:
+                self._process_scanned_payload()
+        else:
+            self.psbt_input.setPlainText(text)
+            self._review_psbt()
+
+    def _process_scanned_payload(self):
+        raw = self.scan_payload.text().strip()
+        if not raw:
+            return
+        if raw.casefold().startswith("bitcoin:"):
+            parsed = urlsplit(raw)
+            if parsed.scheme.casefold() != "bitcoin" or parsed.netloc or parsed.fragment:
+                QMessageBox.warning(self, "Unsupported QR data", "This QR does not contain a standard Bitcoin address URI.")
+                return
+            self.verify_address_input.setText(unquote(parsed.path))
+            self.stack.setCurrentIndex(8)
+            self._verify_receive_address()
+            return
+        if raw.casefold().startswith(("bc1", "1", "3")) and len(raw) <= 128:
+            self.verify_address_input.setText(raw)
+            self.stack.setCurrentIndex(8)
+            self._verify_receive_address()
+            return
+        self.psbt_input.setPlainText(raw)
+        self.stack.setCurrentIndex(7)
+        self._review_psbt()
+
+    def _scanner_error(self, error):
+        if error == QProcess.ProcessError.FailedToStart:
+            self.scanner = None
+            QMessageBox.warning(self, "QR scanner failed", "zbarcam could not open a camera. Check camera access and try again.")
+
+    def _verify_receive_address(self):
+        raw = self.verify_address_input.text().strip()
+        if not raw:
+            QMessageBox.information(self, "Address required", "Scan or enter an address first.")
+            return
+        address = raw
+        if raw.casefold().startswith("bitcoin:"):
+            parsed = urlsplit(raw)
+            if parsed.scheme.casefold() != "bitcoin" or parsed.netloc or parsed.fragment:
+                QMessageBox.warning(self, "Unsupported payment QR", "This QR does not contain a standard Bitcoin address URI.")
+                return
+            address = unquote(parsed.path)
+        try:
+            belongs = self.core.verify_address(address)
+        except ColdSetupError as exc:
+            self.verify_result.setText(str(exc))
+            self.verify_result.setProperty("verified", False)
+            self.verify_result.style().unpolish(self.verify_result)
+            self.verify_result.style().polish(self.verify_result)
+            self.verified_address_label.setEnabled(False)
+            self.address_used_checkbox.setEnabled(False)
+            return
+        self.verify_address_input.setText(address)
+        if belongs:
+            self.verify_result.setText(f"Address belongs to {self.wallet_display_name}.")
+            self.verify_result.setProperty("verified", True)
+            self.verified_address_label.setEnabled(True)
+            self.address_used_checkbox.setEnabled(True)
+        else:
+            self.verify_result.setText("This address does not belong to the current wallet.")
+            self.verify_result.setProperty("verified", False)
+            self.verified_address_label.setEnabled(False)
+            self.address_used_checkbox.setEnabled(False)
+        self.verify_result.style().unpolish(self.verify_result)
+        self.verify_result.style().polish(self.verify_result)
+
+    def _clear_address_result(self):
+        self.verify_result.clear()
+        self.verify_result.setProperty("verified", False)
+        self.verified_address_label.clear()
+        self.address_used_checkbox.setChecked(False)
+        self.verified_address_label.setEnabled(False)
+        self.address_used_checkbox.setEnabled(False)
+        self.verify_result.style().unpolish(self.verify_result)
+        self.verify_result.style().polish(self.verify_result)
+
+    def _review_psbt(self):
+        if self.core is None:
+            return
+        text = self.psbt_input.toPlainText().strip()
+        if not text or len(text) > 2 * 1024 * 1024:
+            QMessageBox.warning(self, "PSBT size", "Enter a base64 PSBT smaller than 2 MiB.")
+            return
+        try:
+            review = self.core.review_psbt(text)
+        except ColdSetupError as exc:
+            QMessageBox.warning(self, "PSBT could not be reviewed", str(exc))
+            return
+        self.psbt_input.blockSignals(True)
+        self.psbt_input.setPlainText(review["psbt"])
+        self.psbt_input.blockSignals(False)
+        self.reviewed_psbt = review["psbt"]
+        self.reviewed_txid = review["unsigned_txid"]
+        lines = [
+            f"Transaction ID: {review['txid']}",
+            f"Inputs: {review['inputs']}    Outputs: {len(review['outputs'])}",
+        ]
+        if review["fee"] is None:
+            lines.append("Fee: not available from this PSBT")
+        else:
+            lines.append(f"Fee: {Decimal(str(review['fee'])):.8f} BTC")
+        lines.append("")
+        for index, output in enumerate(review["outputs"], 1):
+            amount = output["amount"]
+            amount_text = f"{Decimal(str(amount)):.8f} BTC" if amount is not None else "amount unavailable"
+            role = "CHANGE · verified by Core" if output["is_change"] else (
+                "OWN ADDRESS" if output["is_mine"] else "RECIPIENT · verify independently"
+            )
+            lines.extend((f"Output {index} · {role}", f"  {amount_text}", f"  {output['address']}"))
+            if output["address"].startswith("(non-standard"):
+                lines.append(f"  Script: {output['script']}")
+        analysis = review.get("analysis", {})
+        input_states = analysis.get("inputs", [])
+        missing_utxos = sum(1 for item in input_states if item.get("has_utxo") is not True)
+        if missing_utxos:
+            lines.extend(("", f"Warning: Core could not verify UTXO details for {missing_utxos} input(s)."))
+        self.psbt_review.setPlainText("\n".join(lines))
+        self.sign_button.setEnabled(True)
+        self.signed_status.setText("")
+
+    def _sign_reviewed_psbt(self):
+        if not self.reviewed_psbt or not self.reviewed_txid:
+            return
+        password = self.signer_password.text() if self.wallet_encrypted else ""
+        if self.wallet_encrypted and not password:
+            QMessageBox.warning(self, "Wallet password required", "Enter this wallet’s encryption password to sign.")
+            return
+        try:
+            result = self.core.sign_psbt(self.reviewed_psbt, password, self.reviewed_txid)
+        except ColdSetupError as exc:
+            self.signer_password.clear()
+            QMessageBox.warning(self, "Signing failed", str(exc))
+            return
+        self.signer_password.clear()
+        self.signed_psbt.setPlainText(result["psbt"])
+        completion = "All inputs have signatures" if result["complete"] else "Partially signed · additional signer(s) required"
+        self.signed_status.setText(completion + ". The transaction was not finalized or broadcast.")
+        try:
+            self.signed_qr.setPixmap(self._qr_pixmap(result["psbt"]))
+            self.signed_qr.show()
+        except qrcode.exceptions.DataOverflowError:
+            self.signed_qr.hide()
+            self.signed_status.setText(
+                completion + ". Too large for one QR code; save the signed PSBT to transfer it."
+            )
+
+    def _save_signed_psbt(self):
+        text = self.signed_psbt.toPlainText().strip()
+        if not text:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save signed PSBT", "signed-transaction.psbt", "PSBT files (*.psbt);;Text files (*.txt)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(text + "\n", encoding="ascii")
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save PSBT", str(exc))
+
+    def _export_watchonly_wallet(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export watch-only wallet",
+            "Core-Companion-watch-only.dat",
+            "Bitcoin Core wallet file (*.dat);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            exported = self.core.export_watchonly_wallet(path)
+        except ColdSetupError as exc:
+            QMessageBox.warning(self, "Watch-only export failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Watch-only wallet exported",
+            f"Saved to:\n{exported}\n\nThis file contains public wallet data, not private keys. "
+            "On the online node, restore it using Bitcoin Core’s Restore Wallet action.",
+        )
+
+    @staticmethod
+    def _qr_pixmap(payload, size=240):
+        code = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=1, border=4)
+        code.add_data(payload)
+        code.make(fit=True)
+        matrix = code.get_matrix()
+        size = len(matrix)
+        image = QImage(size, size, QImage.Format.Format_RGB32)
+        image.fill(QColor("white"))
+        painter = QPainter(image)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#142331"))
+        for y, row in enumerate(matrix):
+            for x, dark in enumerate(row):
+                if dark:
+                    painter.drawRect(QRect(x, y, 1, 1))
+        painter.end()
+        return QPixmap.fromImage(image).scaled(
+            size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
+        )
+
+    def shutdown_core(self):
+        if self.scanner:
+            process, self.scanner = self.scanner, None
+            process.kill()
+            process.waitForFinished(3000)
+            process.deleteLater()
+        for widget in (self.recovery_text,):
+            widget.clear()
+        for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):
+            field.clear()
+        self.phrase = None
+        self.words.clear()
+        self.current_bip39_passphrase = ""
+        self.current_wallet_passphrase = ""
+        self.signer_password.clear()
+        if self.core is not None:
+            self.core.close()
+            self.core = None
+
+    def _finish(self):
+        try:
+            self.shutdown_core()
+        except ColdSetupError as exc:
+            QMessageBox.critical(self, "Cannot close cold Core", str(exc))
+            return
+        self.accept()
+
+    def reject(self):
+        try:
+            self.shutdown_core()
+        except ColdSetupError as exc:
+            QMessageBox.critical(self, "Cannot close cold Core", str(exc))
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        try:
+            self.shutdown_core()
+        except ColdSetupError as exc:
+            QMessageBox.critical(self, "Cannot close cold Core", str(exc))
+            event.ignore()
+            return
+        event.accept()
