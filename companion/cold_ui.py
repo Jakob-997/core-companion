@@ -229,6 +229,11 @@ class ColdSignerDialog(QDialog):
         self.entropy_commitment.setObjectName("Hash")
         self.entropy_commitment.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         audit_layout.addWidget(self.entropy_commitment)
+        audit_layout.addWidget(_label("BIP39 starting entropy · copy these exact hex bytes to verify the words", False))
+        self.bip39_entropy = QLineEdit()
+        self.bip39_entropy.setReadOnly(True)
+        self.bip39_entropy.setToolTip("Encode these exact entropy bytes with an independent BIP39 tool to obtain the same recovery words.")
+        audit_layout.addWidget(self.bip39_entropy)
         form = QFormLayout()
         self.dice = QLineEdit()
         self.dice.setPlaceholderText("Optional · enter rolls from 1 to 6")
@@ -780,6 +785,7 @@ class ColdSignerDialog(QDialog):
         if choice != self.setup_choice:
             self.wallet_digest = self.os_entropy = self.phrase = None
             self.entropy_audit.clear()
+            self.bip39_entropy.clear()
             self.words.clear()
             self.dice.clear()
         self.setup_choice = choice
@@ -1077,8 +1083,10 @@ class ColdSignerDialog(QDialog):
             self.reject()
 
     def _update_entropy_audit(self, *_args):
+        self.bip39_entropy.clear()
         if self.wallet_digest is None or self.os_entropy is None:
             self.entropy_audit.clear()
+            self.bip39_entropy.clear()
             return
         dice = "".join(self.dice.text().split())
         count = int(self.word_count.currentData())
@@ -1088,6 +1096,7 @@ class ColdSignerDialog(QDialog):
             self.entropy_audit.setPlainText(str(exc))
             return
         size = count * 4 // 3
+        self.bip39_entropy.setText(digest[:size].hex())
         material = entropy_material(self.wallet_digest, self.os_entropy, dice)
         hash_command = (
             'python3 -c "from hashlib import sha256; '
@@ -1105,7 +1114,7 @@ class ColdSignerDialog(QDialog):
             + hash_command + "\n\n"
             f"SHA-256 result: {digest.hex()}\n"
             f"BIP39 entropy ({size * 8} bits / {count} words): {digest[:size].hex()}\n\n"
-            "Convert that entropy to the same words (requires mnemonic==0.21):\n"
+            "Optional independent word check (requires mnemonic==0.21):\n"
             + phrase_command
         )
 
@@ -1325,6 +1334,7 @@ class ColdSignerDialog(QDialog):
         self.wallet_digest = None
         self.os_entropy = None
         self.entropy_audit.clear()
+        self.bip39_entropy.clear()
         self.current_bip39_passphrase = ""
         self.current_wallet_passphrase = ""
         self.wallet_encrypted = result.get("encrypted") is True
@@ -1742,6 +1752,7 @@ class ColdSignerDialog(QDialog):
         self.os_entropy = None
         self.wallet_digest = None
         self.entropy_audit.clear()
+        self.bip39_entropy.clear()
         for widget in (self.recovery_text,):
             widget.clear()
         for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):
