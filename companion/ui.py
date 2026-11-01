@@ -25,7 +25,7 @@ from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession
 from .theme import stylesheet
-from .widgets import ActionRow, ChoiceRow
+from .widgets import ActionRow, ChoiceRow, LineIcon
 
 def label(text, name=None):
     widget = QLabel(text)
@@ -97,17 +97,19 @@ class App(QMainWindow):
         else:
             self.core_status.setText("No local Core connection found")
     def _menus(self):
-        for title, items in [
-            ("Wallet", [("Welcome", lambda: self.tabs.setCurrentIndex(0)), ("Choose wallet mode", lambda: self.tabs.setCurrentIndex(1)), ("Wallet home", lambda: self.tabs.setCurrentIndex(2)), ("Connection settings…", self.show_connection), ("Disconnect", self.disconnect), ("Close", self.close)]),
-            ("View", [("Wallet activity", lambda: self.tabs.setCurrentIndex(3)), ("Receive Bitcoin", self._open_receive), ("Wallet addresses", lambda: self.tabs.setCurrentIndex(5)), ("Refresh wallet", self.refresh)]),
-            ("Tools", [("Tools & Settings", lambda: self.tabs.setCurrentIndex(6)), ("Inspect PSBT", lambda: self.tabs.setCurrentIndex(6))]),
-            ("Help", [("About Core Companion", self.about)]),
+        menu = self.menuBar().addMenu("Wallet")
+        for text, callback in [
+            ("Welcome", lambda: self.tabs.setCurrentIndex(0)),
+            ("Choose wallet mode", lambda: self.tabs.setCurrentIndex(1)),
+            ("Wallet home", lambda: self.tabs.setCurrentIndex(2)),
+            ("Connection settings…", self.show_connection),
+            ("Disconnect", self.disconnect),
+            ("About Core Companion", self.about),
+            ("Close", self.close),
         ]:
-            menu = self.menuBar().addMenu(title)
-            for text, callback in items:
-                action = QAction(text, self)
-                action.triggered.connect(callback)
-                menu.addAction(action)
+            action = QAction(text, self)
+            action.triggered.connect(callback)
+            menu.addAction(action)
 
     def _layout(self):
         central = QWidget()
@@ -222,18 +224,24 @@ class App(QMainWindow):
         ))
         notice = QFrame()
         notice.setObjectName("ColdNotice")
-        notice_layout = QVBoxLayout(notice)
+        notice_layout = QHBoxLayout(notice)
         notice_layout.setContentsMargins(16, 14, 16, 14)
-        notice_layout.setSpacing(6)
-        notice_layout.addWidget(label(
+        notice_layout.setSpacing(12)
+        notice_icon = LineIcon("offline", "ColdNoticeIcon", stroke_width=1.8, inset=0)
+        notice_icon.setFixedSize(22, 22)
+        notice_layout.addWidget(notice_icon, 0, Qt.AlignmentFlag.AlignTop)
+        notice_copy = QVBoxLayout()
+        notice_copy.setSpacing(5)
+        notice_copy.addWidget(label(
             "Computer networking stays on" if self.dev_keep_network else "Network access will be disabled",
-            "Heading",
+            "NoticeTitle",
         ))
         if self.dev_keep_network:
             detail = "Bitcoin Core peer networking remains off. Swap is still disabled. Use test wallets only."
         else:
             detail = "Swap will also be disabled. Close other programs first; on a low-memory computer, the desktop may freeze."
-        notice_layout.addWidget(label(detail, "Muted"))
+        notice_copy.addWidget(label(detail, "Muted"))
+        notice_layout.addLayout(notice_copy, 1)
         layout.addWidget(notice)
         layout.addStretch(1)
         footer = QHBoxLayout()

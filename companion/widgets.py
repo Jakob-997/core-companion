@@ -14,6 +14,7 @@ _ICONS = {
     "activity": '<path d="M4 14h3l2-7 4 11 2-7h5"/><path d="M4 4h16v16H4z"/>',
     "policy": '<path d="M5 4h14v16H5z"/><path d="M8 8h2v2H8zm0 5h2v2H8zm5-4h3m-3 5h3"/>',
     "export": '<path d="M4 13v6h16v-6M12 15V3m-4 4 4-4 4 4"/>',
+    "offline": '<path d="M4 7.5a12 12 0 0 1 16 0M7 10.5a7.5 7.5 0 0 1 10 0M10 13.5a3.2 3.2 0 0 1 4 0"/><path d="m3 3 18 18"/><path d="M12 18.5h.01"/>',
     "cold": '<path d="M12 2.8 19 5.7v5.1c0 4.7-3.1 8-7 10.4-3.9-2.4-7-5.7-7-10.4V5.7l7-2.9Z"/><rect x="8.3" y="10.5" width="7.4" height="5.7" rx="1.2"/><path d="M10 10.5V9a2 2 0 0 1 4 0v1.5"/>',
     "node": '<rect x="3.5" y="4" width="7" height="6" rx="1.4"/><rect x="13.5" y="14" width="7" height="6" rx="1.4"/><rect x="13.5" y="4" width="7" height="6" rx="1.4"/><rect x="3.5" y="14" width="7" height="6" rx="1.4"/><path d="M10.5 7h3m-10 6v1m17-1v1m-10 3h3"/>',
     "new": '<path d="M5 6.5A2.5 2.5 0 0 1 7.5 4H19v15H6.5A2.5 2.5 0 0 1 4 16.5v-8A2 2 0 0 1 6 6.5H19"/><path d="M11.5 9v6m-3-3h6"/>',
@@ -29,10 +30,12 @@ _ICON_ALIASES = {
 
 
 class LineIcon(QLabel):
-    def __init__(self, glyph, object_name):
+    def __init__(self, glyph, object_name, stroke_width=2.05, inset=7):
         super().__init__()
         self.setObjectName(object_name)
         self._paths = _ICONS.get(_ICON_ALIASES.get(glyph, glyph))
+        self._stroke_width = stroke_width
+        self._inset = inset
         if not self._paths:
             self.setText(glyph)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -45,12 +48,14 @@ class LineIcon(QLabel):
         color = self.palette().color(QPalette.ColorRole.WindowText).name()
         svg = (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
-            f'fill="none" stroke="{color}" stroke-width="1.8" '
+            f'fill="none" stroke="{color}" stroke-width="{self._stroke_width}" '
             f'stroke-linecap="round" stroke-linejoin="round">{self._paths}</svg>'
         )
         renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
         painter = QPainter(self)
-        bounds = QRectF(self.rect()).adjusted(7, 7, -7, -7)
+        bounds = QRectF(self.rect()).adjusted(
+            self._inset, self._inset, -self._inset, -self._inset
+        )
         renderer.render(painter, bounds)
         painter.end()
 
@@ -140,14 +145,18 @@ class ChoiceRow(QPushButton):
             copy.addWidget(detail)
         row.addLayout(copy, 1)
 
-        self.radio = QLabel("○")
+        self.radio = QFrame()
         self.radio.setObjectName("ChoiceRadio")
-        self.radio.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.radio.setFixedSize(20, 20)
+        self.radio.setProperty("accent", accent)
+        self.radio.setProperty("selected", False)
+        self.radio.setFixedSize(17, 17)
         self.radio.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         row.addWidget(self.radio)
         self.toggled.connect(self._show_selection)
         self._show_selection(self.isChecked())
 
     def _show_selection(self, selected):
-        self.radio.setText("●" if selected else "○")
+        self.radio.setProperty("selected", selected)
+        self.radio.style().unpolish(self.radio)
+        self.radio.style().polish(self.radio)
+        self.radio.update()

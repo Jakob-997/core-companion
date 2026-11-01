@@ -3,7 +3,7 @@
 
 _STYLE = """
 QMainWindow, QDialog { background: @page@; }
-QWidget { color: @text@; font-family: sans-serif; font-size: 13px; }
+QWidget { color: @text@; font-family: Cantarell; font-size: 14px; }
 QWidget#Page { background: @page@; }
 QWidget#OnboardingPage { background: @page@; }
 QWidget#OnlinePage { background: @page@; }
@@ -19,13 +19,14 @@ QLabel#Mark { background: @blue-soft@; color: @blue@; border: 1px solid @blue-bo
 QLabel#Title { color: @text@; font-size: 27px; font-weight: 620; }
 QLabel#Heading { color: @text@; font-size: 19px; font-weight: 600; }
 QLabel#Eyebrow { color: @muted@; font-size: 10px; font-weight: 650; letter-spacing: 1px; }
-QLabel#Muted { color: @muted@; }
+QLabel#Muted { color: @muted@; font-size: 12px; }
 QLabel#Hash { color: @blue@; font-family: monospace; font-size: 13px; }
 QLabel#DevNotice { background: #fff1dc; color: #754900; border: 1px solid #e7bd82; border-radius: 7px; padding: 8px 11px; font-weight: 650; }
 QLabel#Badge { background: @accent-soft@; color: @accent-strong@; padding: 5px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+QLabel#ColdBadge { background: @blue-soft@; color: @blue@; padding: 5px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
 QLabel#Balance { color: @text@; font-size: 29px; font-weight: 650; }
 QLabel#SecondaryBalance { color: @muted@; font-size: 20px; font-weight: 550; }
-QPushButton { min-height: 38px; padding: 0 15px; border: 1px solid @border@; border-radius: 7px; background: @surface@; color: @text@; font-weight: 600; }
+QPushButton { min-height: 38px; padding: 0 15px; border: 1px solid @border@; border-radius: 7px; background: @surface@; color: @text@; font-weight: 560; }
 QPushButton:hover { background: @surface-2@; border-color: @accent@; }
 QPushButton:pressed { background: @accent-soft@; }
 QPushButton:disabled { color: @muted@; background: @surface-2@; }
@@ -50,11 +51,11 @@ QPushButton#ChoiceRow[accent="blue"] QLabel#ChoiceIcon { background: @blue-soft@
 QPushButton#ChoiceRow[accent="red"] QLabel#ChoiceIcon { background: @red-soft@; color: @red@; }
 QLabel#ChoiceTitle { color: @text@; font-size: 13px; font-weight: 620; }
 QLabel#ChoiceDescription { color: @muted@; font-size: 11px; font-weight: 400; }
-QLabel#ChoiceRadio { color: @muted@; font-size: 16px; }
 QFrame#ChoiceDivider { border: 0; border-top: 1px solid @border@; min-height: 1px; max-height: 1px; }
-QPushButton#ChoiceRow:checked[accent="green"] QLabel#ChoiceRadio { color: @accent-strong@; }
-QPushButton#ChoiceRow:checked[accent="blue"] QLabel#ChoiceRadio { color: @blue@; }
-QPushButton#ChoiceRow:checked[accent="red"] QLabel#ChoiceRadio { color: @red@; }
+QFrame#ChoiceRadio { border: 1px solid @muted@; border-radius: 9px; background: transparent; }
+QFrame#ChoiceRadio[accent="green"][selected="true"] { border: 5px solid @accent@; background: @surface@; }
+QFrame#ChoiceRadio[accent="blue"][selected="true"] { border: 5px solid @blue@; background: @surface@; }
+QFrame#ChoiceRadio[accent="red"][selected="true"] { border: 5px solid @red@; background: @surface@; }
 QMainWindow#OnlineNode QPushButton#ColdContinue { background: @blue@; border-color: @blue@; color: white; }
 QMainWindow#OnlineNode QPushButton#ColdContinue:hover { background: @blue@; }
 QFrame#KPI { background: @surface@; border: 1px solid @border@; border-radius: 9px; }
@@ -72,14 +73,18 @@ QDialog#ColdSigner QFrame#ActionPrimary { background: @blue-soft@; border-color:
 QDialog#ColdSigner QFrame#ActionPrimary:hover { border-color: @blue@; }
 QDialog#ColdSigner QLabel#BlueIcon { background: @blue-soft@; color: @blue@; }
 QFrame#ColdNotice { background: @blue-soft@; border: 1px solid @blue-border@; border-radius: 8px; }
+QLabel#ColdNoticeIcon { color: @blue@; }
+QLabel#NoticeTitle { color: @text@; font-size: 14px; font-weight: 620; }
 QLabel#ActionTitle { color: @text@; font-size: 14px; font-weight: 620; }
 QLabel#BlueIcon { background: @blue-soft@; color: @blue@; border-radius: 8px; font-size: 18px; font-weight: 650; }
 QFrame#IdentityPanel { background: @surface@; border: 1px solid @border@; border-radius: 10px; }
 QWidget#IdentityMark { background: @surface-2@; border: 1px solid @border@; border-radius: 7px; }
 QLabel#IdentityTile { background: @border@; border-radius: 1px; }
 QLabel#IdentityTile[lit="true"] { background: @blue@; }
-QLabel#IdentityName { color: @text@; font-size: 17px; font-weight: 650; }
-QLabel#ScanTarget { background: @surface-2@; color: @blue@; border: 1px dashed @blue-border@; border-radius: 9px; font-size: 50px; }
+QLabel#IdentityName { color: @text@; font-size: 18px; font-weight: 630; }
+QLabel#IdentityMeta { color: @muted@; font-size: 12px; }
+QFrame#ScanTarget { background: @surface-2@; border: 1px dashed @blue-border@; border-radius: 9px; }
+QLabel#ScanGlyph { color: @blue@; }
 QLabel#QR { background: white; border: 1px solid @border@; border-radius: 8px; }
 QLabel#Verification[verified="true"] { color: #1e7049; font-weight: 650; }
 QLabel#Verification[verified="false"] { color: #b0413e; font-weight: 650; }
