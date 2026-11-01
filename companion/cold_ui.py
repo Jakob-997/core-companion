@@ -2,6 +2,7 @@
 
 import base64
 import json
+import hashlib
 import secrets
 import unicodedata
 from decimal import Decimal
@@ -224,21 +225,6 @@ class ColdSignerDialog(QDialog):
         self.entropy_commitment.setObjectName("Hash")
         self.entropy_commitment.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.entropy_commitment)
-        audit = _label(
-            "Audit: sha256sum /path/to/wallet.dat\n"
-            "The original temporary file is deleted after hashing. The hash alone cannot reproduce the phrase.\n"
-            "Commitment = SHA256('Core Companion entropy commitment v1' + zero byte + wallet hash + OS randomness).\n"
-            "Entropy = SHA256(domain || uint16be(32) || wallet hash || uint16be(32) || "
-            "32 random OS bytes || uint32be(dice length) || ASCII dice), truncated to the selected BIP39 size.\n"
-            "Domain: Core Companion BIP39 entropy v1 followed by a zero byte.", True
-        )
-        audit.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        audit.hide()
-        audit_button = QPushButton("Audit details")
-        audit_button.setCheckable(True)
-        audit_button.toggled.connect(audit.setVisible)
-        layout.addWidget(audit_button, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(audit)
         form = QFormLayout()
         self.dice = QLineEdit()
         self.dice.setPlaceholderText("Optional · enter rolls from 1 to 6")
@@ -253,6 +239,13 @@ class ColdSignerDialog(QDialog):
             self.word_count.addItem(f"{count} words", count)
         form.addRow("Recovery phrase", self.word_count)
         layout.addLayout(form)
+        layout.addWidget(_label("Secret hash calculation · enough to recreate this wallet. Verify only on another offline computer.", True))
+        self.entropy_audit = QPlainTextEdit()
+        self.entropy_audit.setReadOnly(True)
+        self.entropy_audit.setMaximumHeight(250)
+        layout.addWidget(self.entropy_audit)
+        self.dice.textChanged.connect(self._update_entropy_audit)
+        self.word_count.currentIndexChanged.connect(self._update_entropy_audit)
         layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("Back")
@@ -760,6 +753,7 @@ class ColdSignerDialog(QDialog):
         self._reset_protection()
         if choice != self.setup_choice:
             self.wallet_digest = self.os_entropy = self.phrase = None
+            self.entropy_audit.clear()
             self.words.clear()
             self.dice.clear()
         self.setup_choice = choice
@@ -1038,6 +1032,7 @@ class ColdSignerDialog(QDialog):
         self.fingerprint.setText(" ".join(hex_hash[i:i + 8] for i in range(0, len(hex_hash), 8)))
         commitment = entropy_commitment(self.wallet_digest, self.os_entropy).hex()
         self.entropy_commitment.setText(" ".join(commitment[i:i + 8] for i in range(0, len(commitment), 8)))
+        self._update_entropy_audit()
         self.stack.setCurrentIndex(1)
 
     def _start_recovery(self):
@@ -1053,6 +1048,43 @@ class ColdSignerDialog(QDialog):
         except (ColdSetupError, OSError) as exc:
             QMessageBox.critical(self, "Cold signer setup failed", str(exc))
             self.reject()
+
+    def _update_entropy_audit(self, *_args):
+        if self.wallet_digest is None or self.os_entropy is None:
+            self.entropy_audit.clear()
+            return
+        dice = "".join(self.dice.text().split())
+        count = int(self.word_count.currentData())
+        try:
+            digest = entropy_from_sources(self.wallet_digest, 24, dice, os_entropy=self.os_entropy)
+        except SeedError as exc:
+            self.entropy_audit.setPlainText(str(exc))
+            return
+        size = count * 4 // 3
+        command = (
+            "python3 - <<'PY'\n"
+            "from hashlib import sha256\n"
+            "from mnemonic import Mnemonic  # python-mnemonic==0.21\n"
+            f"wallet_hash = bytes.fromhex('{self.wallet_digest.hex()}')\n"
+            f"os_random = bytes.fromhex('{self.os_entropy.hex()}')\n"
+            f"dice = b'{dice}'\n"
+            "material = (b'Core Companion BIP39 entropy v1\\x00'\n"
+            "    + len(wallet_hash).to_bytes(2, 'big') + wallet_hash\n"
+            "    + len(os_random).to_bytes(2, 'big') + os_random\n"
+            "    + len(dice).to_bytes(4, 'big') + dice)\n"
+            "digest = sha256(material).digest()\n"
+            "print('Combined SHA-256:', digest.hex())\n"
+            f"print('BIP39 entropy:', digest[:{size}].hex())\n"
+            f"print(Mnemonic('english').to_mnemonic(digest[:{size}]))\nPY"
+        )
+        self.entropy_audit.setPlainText(
+            f"Dice digits: {dice or '(none)'}\n"
+            f"Dice SHA-256: {hashlib.sha256(dice.encode('ascii')).hexdigest()}\n"
+            "The mixture uses the dice digits directly, not their displayed hash.\n"
+            f"Combined SHA-256: {digest.hex()}\n"
+            f"BIP39 entropy ({size * 8} bits / {count} words): {digest[:size].hex()}\n\n"
+            "Reproduce exactly (SECRET inputs; no additional randomness):\n" + command
+        )
 
     def _generate_phrase(self):
         if self.wallet_digest is None or self.os_entropy is None:
@@ -1070,7 +1102,6 @@ class ColdSignerDialog(QDialog):
             return
         self.words = self.phrase.split()
         self.phrase_source = "create"
-        self.dice.clear()
         self._render_words()
         self.stack.setCurrentIndex(3)
 
@@ -1270,6 +1301,7 @@ class ColdSignerDialog(QDialog):
         self.recovery_text.clear()
         self.wallet_digest = None
         self.os_entropy = None
+        self.entropy_audit.clear()
         self.current_bip39_passphrase = ""
         self.current_wallet_passphrase = ""
         self.wallet_encrypted = result.get("encrypted") is True
@@ -1686,6 +1718,7 @@ class ColdSignerDialog(QDialog):
         self._stop_scanner()
         self.os_entropy = None
         self.wallet_digest = None
+        self.entropy_audit.clear()
         for widget in (self.recovery_text,):
             widget.clear()
         for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):
