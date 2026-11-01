@@ -105,21 +105,21 @@ class OfflineCore:
             "-connect=0",
             "-dnsseed=0",
             "-discover=0",
-            "-upnp=0",
             "-natpmp=0",
             "-listenonion=0",
             "-maxconnections=0",
             f"-debuglogfile={log}",
         ]
         try:
-            self.process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                env={"PATH": "/usr/bin:/bin", "HOME": str(self.directory), "LANG": "C", "LC_ALL": "C"},
-            )
+            with (self.directory / "startup.log").open("xb") as startup_log:
+                self.process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=startup_log,
+                    stderr=subprocess.STDOUT,
+                    close_fds=True,
+                    env={"PATH": "/usr/bin:/bin", "HOME": str(self.directory), "LANG": "C", "LC_ALL": "C"},
+                )
         except OSError as exc:
             self._remove_directory()
             raise ColdSetupError("Could not start the isolated Bitcoin Core process.") from exc
@@ -129,8 +129,19 @@ class OfflineCore:
         last_error = None
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
+                try:
+                    with (self.directory / "startup.log").open("rb") as startup_log:
+                        startup_log.seek(0, os.SEEK_END)
+                        startup_log.seek(max(0, startup_log.tell() - 3000))
+                        detail = startup_log.read().decode("utf-8", "replace").strip()
+                except OSError:
+                    detail = ""
+                exit_code = self.process.returncode
                 self._remove_directory()
-                raise ColdSetupError("The isolated Bitcoin Core process exited during startup.")
+                raise ColdSetupError(
+                    f"The isolated Bitcoin Core process exited during startup (exit {exit_code})."
+                    + (f"\n\n{detail}" if detail else "")
+                )
             try:
                 info = self.rpc.call("getnetworkinfo")
                 if int(info.get("version", 0)) < 321000:
