@@ -29,6 +29,8 @@ call that RPC instead of adding parallel wallet logic.
 - `wallet.py` and `ui.py`: watch-only node view; `ui.py` starts the cold helper.
 - `core_download.py`: invokes Bitcoin Core's upstream release verifier and
   safely installs the verified Linux package.
+- `qr.py` and `scanner.py`: shared QR rendering and bounded camera transport.
+- `AUDIT.md`: review findings, checked boundaries, and remaining limitations.
 
 ## Runtime boundaries
 
@@ -54,8 +56,9 @@ The UI helper starts in its own process group, disables core dumps and Linux
 dumpability, then stops Core and removes its session directory before the
 controller restores the prior host settings.
 
-The helper passes private key data only over authenticated loopback RPC. No
-wallet database is opened by companion code. No arbitrary RPC console is
+The helper passes private key data only over authenticated loopback RPC. The
+companion hashes the closed temporary wallet file as bytes; it does not parse
+or modify its database. No arbitrary RPC console is
 exposed. The RPC method allowlist is an application guardrail, not a server-side
 permission boundary: a compromised client with a Core cookie can bypass it.
 Keep Core RPC bound to loopback and do not expose it to a network.
@@ -70,7 +73,10 @@ allowlist in `core_download.py`, and marks only those keys trusted in that
 temporary home. The verifier checks the signed `SHA256SUMS` files from both
 official hosts, requires at least three accepted signatures, downloads the
 selected Linux archive, and checks its SHA-256 hash. The user's personal GPG
-keyring is not modified. The pinned set was confirmed against Bitcoin Core
+keyring is not modified. Companion additionally verifies the checksum signature
+status directly with GPG, requiring three distinct non-expired, non-revoked
+pinned primary signers. Repeated signature packets do not increase this count.
+The pinned set was confirmed against Bitcoin Core
 v32.1's official `SHA256SUMS.asc`; signer rotation requires a reviewed app
 update. Only after verification succeeds does the app install the package. The extractor rejects
 absolute or parent paths, links, special files and unexpectedly large members,
@@ -85,7 +91,10 @@ and starts with `-prune=10000`. It runs independently after the UI closes and
 reconnects on the next app launch. Downloading Core does not start the node;
 cold-signer setup therefore does not silently bring up online networking. If a
 Core cookie exists in the standard user data directory, Companion tries that
-node first and starts its managed node if the connection is stale or fails.
+node first. If that connection is stale or fails, selecting Online Node starts
+its managed node. A stale connection record does not start online peer
+networking before the user chooses Online Node. Managed startup waits are
+bounded, and a stale managed cookie no longer causes an endless reconnect loop.
 
 ## Seed and key flow
 
@@ -111,10 +120,12 @@ node first and starts its managed node if the connection is stale or fails.
    strings from process memory. The helper isolation reduces exposure but does
    not make this a reviewed or production-secure signer.
 
-Before closing, the user can ask Core to export a watch-only wallet file to a
-chosen destination. Core removes private keys from this export; it includes
-public descriptors and address/transaction data. Restore that file in Bitcoin
-Core on the online node.
+Before closing, the user can export the public receive/change descriptors and
+wallet name as a QR. Core supplies the public descriptors; private descriptors
+are never used for this export. The online importer checks that both descriptors are
+public and solvable, creates a wallet with private keys disabled, and delegates
+import and historical scanning to Core. Pruned-away history cannot be recovered
+by this import without obtaining the missing blocks.
 
 BIP39's checksum does not always identify a unique final word. For a partial
 phrase, the recovery screen displays the checksum-valid candidates and asks the
@@ -126,8 +137,9 @@ phrase is the intended one.
 The cold helper accepts a base64 PSBT from a file, paste, or one QR code decoded
 by the system `zbarcam` utility. Core enriches and decodes it without signing.
 The UI displays every output, the fee, and outputs Core identifies as change.
-Signing is a separate user action. Before signing, the helper checks that the
-unsigned transaction ID still matches the reviewed one, calls
+Signing is a separate user action. The Core wrapper remembers the exact PSBT
+approved by review, rejects non-ALL/non-DEFAULT input signature modes, checks
+that the unsigned transaction ID still matches the reviewed one, calls
 `walletprocesspsbt`, and checks the transaction ID again. Core does not finalize
 or broadcast it. The cold process has no blockchain, so input values and the
 fee displayed from PSBT data are not independently verified against chain
@@ -144,7 +156,7 @@ trusted source before signing.
 The desktop app uses PySide6 Qt Widgets. The cold helper adds Trezor's
 `python-mnemonic` for BIP39 and BIP32 master-key creation and `qrcode` for QR
 encoding. It uses installed Linux tools for privilege prompts, swap, links and
-optional camera scanning. Core is selected by the user and is not bundled.
+optional camera scanning. Core is downloaded and verified separately and is not bundled.
 Review the exact pinned dependencies and the supported Core version whenever
 the app is packaged or updated.
 

@@ -11,6 +11,8 @@ def _prepare_cold_helper():
     import os
     import resource
 
+    os.umask(0o077)
+
     try:
         os.setsid()
     except OSError as exc:

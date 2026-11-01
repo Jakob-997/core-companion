@@ -3,7 +3,7 @@
 
 _STYLE = """
 QMainWindow, QDialog { background: @page@; }
-QWidget { color: @text@; font-family: "Cantarell"; font-size: 14px; }
+QWidget { color: @text@; font-size: 14px; }
 QWidget#Page { background: @page@; }
 QWidget#OnboardingPage { background: @page@; }
 QWidget#OnlinePage { background: @page@; }

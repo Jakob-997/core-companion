@@ -1,18 +1,17 @@
 """Short-lived Linux UI for creating or recovering a Core signing wallet."""
 
-import secrets
 import base64
 import json
-import shutil
 import unicodedata
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-import qrcode
+from .qr import qr_pixmap
+from .scanner import QRScanner
 from qrcode.exceptions import DataOverflowError
-from PySide6.QtCore import Qt, QRect, QProcess, QEvent
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
+from PySide6.QtCore import Qt, QEvent
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QPlainTextEdit,
@@ -35,6 +34,7 @@ from .widgets import ActionRow, ChoiceRow, IconButton, LineIcon
 
 def _label(text, muted=False):
     widget = QLabel(text)
+    widget.setTextFormat(Qt.TextFormat.PlainText)
     widget.setWordWrap(True)
     if muted:
         widget.setObjectName("Muted")
@@ -75,7 +75,6 @@ class ColdSignerDialog(QDialog):
         self.reviewed_psbt = None
         self.reviewed_txid = None
         self.scanner = None
-        self.scanner_buffer = bytearray()
         self.scanner_target_field = None
         self.help_mode = False
         self.wallet_display_name = "Cold storage"
@@ -138,6 +137,8 @@ class ColdSignerDialog(QDialog):
         self._build_protection_page()
         self.status_left = _label("Cold signer · offline", True)
         self.status_right = _label("Setup", True)
+        self.status_left.setWordWrap(False)
+        self.status_right.setWordWrap(False)
         status = QHBoxLayout()
         status.addWidget(self.status_left)
         status.addStretch()
@@ -165,14 +166,8 @@ class ColdSignerDialog(QDialog):
     def _page(self):
         page = QWidget()
         page.setObjectName("Page")
-        shell = QVBoxLayout(page)
-        shell.setContentsMargins(30, 0, 30, 0)
-        content = QWidget()
-        content.setObjectName("PageContent")
-        content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        shell.addWidget(content, 1)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 16, 0, 16)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 16, 30, 16)
         layout.setSpacing(14)
         self.stack.addWidget(page)
         return layout
@@ -185,10 +180,6 @@ class ColdSignerDialog(QDialog):
         self.wallet_name_input = QLineEdit()
         self.wallet_name_input.setPlaceholderText("Wallet name")
         layout.addWidget(self.wallet_name_input)
-        self.wallet_type = QComboBox()
-        self.wallet_type.addItem("Single-signature", "single")
-        self.wallet_type.addItem("Multisig · BIP87", "multisig")
-        self.wallet_type.hide()
         form = QFormLayout()
         self.address_type_form = form
         self.address_type = QComboBox()
@@ -233,6 +224,11 @@ class ColdSignerDialog(QDialog):
             "Domain: Core Companion BIP39 entropy v1 followed by a zero byte.", True
         )
         audit.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        audit.hide()
+        audit_button = QPushButton("Audit details")
+        audit_button.setCheckable(True)
+        audit_button.toggled.connect(audit.setVisible)
+        layout.addWidget(audit_button, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(audit)
         form = QFormLayout()
         self.dice = QLineEdit()
@@ -520,7 +516,7 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(header)
         layout.addWidget(_label("Addresses generated or confirmed on this signer.", True))
         self.address_table = QTableWidget(0, 3)
-        self.address_table.setHorizontalHeaderLabels(["LABEL", "ADDRESS", "USED"])
+        self.address_table.setHorizontalHeaderLabels(["LABEL", "ADDRESS", "SAVED"])
         self.address_table.verticalHeader().hide()
         self.address_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.address_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -767,7 +763,6 @@ class ColdSignerDialog(QDialog):
         if self.type_choice is None:
             return
         self.wallet_mode = self.type_choice
-        self.wallet_type.setCurrentIndex(0 if self.type_choice == "single" else 1)
         self.address_type.setVisible(self.type_choice == "single")
         address_label = self.address_type_form.labelForField(self.address_type)
         if address_label:
@@ -795,17 +790,8 @@ class ColdSignerDialog(QDialog):
             self._create_single_signature()
 
     def _continue_multisig_setup(self):
-        seen = set()
-        for name, key, _scan in self.signer_fields:
-            signer_name = name.text().strip()
-            signer_key = key.text().strip()
-            if not signer_name or not signer_key:
-                QMessageBox.warning(self, "Complete signer details", "Enter a label and account xpub for every signer.")
-                return
-            if signer_name.casefold() in seen or signer_name.casefold() == self.own_signer_name.text().strip().casefold():
-                QMessageBox.warning(self, "Signer labels", "Each signer needs a different label.")
-                return
-            seen.add(signer_name.casefold())
+        if self._signer_details() is None:
+            return
         if self.setup_choice == "new":
             self._start_new_wallet()
         elif self.setup_choice == "recover":
@@ -900,7 +886,7 @@ class ColdSignerDialog(QDialog):
         layout.addWidget(self.sign_button, 0, Qt.AlignmentFlag.AlignRight)
         signed_row = QHBoxLayout()
         self.signed_qr = QLabel()
-        self.signed_qr.setFixedSize(205, 205)
+        self.signed_qr.setFixedSize(320, 320)
         self.signed_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.signed_qr.hide()
         signed_row.addWidget(self.signed_qr, 0, Qt.AlignmentFlag.AlignTop)
@@ -952,9 +938,6 @@ class ColdSignerDialog(QDialog):
         self.verified_address_label.setPlaceholderText("Label · optional")
         self.verified_address_label.setEnabled(False)
         layout.addWidget(self.verified_address_label)
-        self.address_used_checkbox = QCheckBox("Mark this address as used")
-        self.address_used_checkbox.setEnabled(False)
-        layout.addWidget(self.address_used_checkbox)
         layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("Back to wallet")
@@ -970,18 +953,10 @@ class ColdSignerDialog(QDialog):
     def _toggle_bip39_fields(self, enabled):
         for widget in (self.bip39_passphrase1, self.bip39_passphrase2, self.bip39_show):
             widget.setEnabled(enabled)
+            widget.setVisible(enabled)
         if not enabled:
             self.bip39_passphrase1.clear()
             self.bip39_passphrase2.clear()
-
-    def _toggle_protection_group(self, enabled):
-        if not enabled:
-            self.use_bip39_passphrase.setChecked(False)
-            self.encrypt_wallet.setChecked(False)
-            self.bip39_passphrase1.clear()
-            self.bip39_passphrase2.clear()
-            self.wallet_password1.clear()
-            self.wallet_password2.clear()
 
     def _toggle_bip39_visibility(self, visible):
         mode = QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
@@ -991,6 +966,7 @@ class ColdSignerDialog(QDialog):
     def _toggle_wallet_fields(self, enabled):
         for widget in (self.wallet_password1, self.wallet_password2, self.wallet_show):
             widget.setEnabled(enabled)
+            widget.setVisible(enabled)
         if not enabled:
             self.wallet_password1.clear()
             self.wallet_password2.clear()
@@ -1022,7 +998,6 @@ class ColdSignerDialog(QDialog):
     def _start_new_wallet(self):
         if self.core is None:
             return
-        self.wallet_mode = self.wallet_type.currentData()
         try:
             self.wallet_digest = self.core.create_entropy_wallet_hash()
         except ColdSetupError as exc:
@@ -1035,7 +1010,6 @@ class ColdSignerDialog(QDialog):
     def _start_recovery(self):
         if self.core is None:
             return
-        self.wallet_mode = self.wallet_type.currentData()
         self._clear_recovery_candidates()
         self.recovery_text.clear()
         self.stack.setCurrentIndex(2)
@@ -1216,7 +1190,7 @@ class ColdSignerDialog(QDialog):
             return
         self._show_complete(result, "Single-signature")
 
-    def _create_multisig(self):
+    def _signer_details(self):
         signers = []
         own_label = self.own_signer_name.text().strip()
         if not own_label:
@@ -1234,6 +1208,12 @@ class ColdSignerDialog(QDialog):
                 return
             seen_labels.add(signer_label.casefold())
             signers.append({"label": signer_label, "key": signer_key})
+        return signers
+
+    def _create_multisig(self):
+        signers = self._signer_details()
+        if signers is None:
+            return
         try:
             result = self.core.create_multisig_wallet(
                 self.phrase,
@@ -1241,7 +1221,7 @@ class ColdSignerDialog(QDialog):
                 signers,
                 self.current_wallet_passphrase,
                 self.current_bip39_passphrase,
-                own_label,
+                self.own_signer_name.text().strip(),
             )
         except (SeedError, ColdSetupError) as exc:
             QMessageBox.critical(self, "Core wallet setup failed", str(exc))
@@ -1386,7 +1366,7 @@ class ColdSignerDialog(QDialog):
         self.address_detail_title.setText(record.get("label") or "Wallet address")
         self.address_detail_value.setText(record["address"])
         self.address_detail_label.setText(record.get("label", ""))
-        self.address_used_status.setText("✓  Used on this signer" if record.get("used") else "Not marked used")
+        self.address_used_status.setText("Saved on this signer")
         self.address_qr.setPixmap(self._qr_pixmap(record["address"], size=320))
         self.stack.setCurrentIndex(11)
 
@@ -1408,21 +1388,19 @@ class ColdSignerDialog(QDialog):
         if not address or self.verify_result.property("verified") is not True:
             self.stack.setCurrentIndex(9)
             return
-        if self.address_used_checkbox.isChecked():
-            record = next((entry for entry in self.address_records if entry["address"] == address), None)
-            if record is None:
-                record = {"address": address, "label": "", "used": True}
-                self.address_records.insert(0, record)
-            record["used"] = True
-            record["label"] = self.verified_address_label.text().strip()
-            try:
-                self.core.set_address_label(address, record["label"])
-            except ColdSetupError as exc:
-                QMessageBox.warning(self, "Could not save address", str(exc))
-                return
+        label = self.verified_address_label.text().strip()
+        try:
+            self.core.set_address_label(address, label)
+        except ColdSetupError as exc:
+            QMessageBox.warning(self, "Could not save address", str(exc))
+            return
+        record = next((entry for entry in self.address_records if entry["address"] == address), None)
+        if record is None:
+            record = {"address": address, "used": True}
+            self.address_records.insert(0, record)
+        record["label"] = label
         self.verify_address_input.clear()
         self.verified_address_label.clear()
-        self.address_used_checkbox.setChecked(False)
         self.stack.setCurrentIndex(6)
 
     def _invalidate_psbt_review(self):
@@ -1440,7 +1418,8 @@ class ColdSignerDialog(QDialog):
         if not path:
             return
         try:
-            raw = Path(path).read_bytes()
+            with Path(path).open("rb") as source:
+                raw = source.read(2 * 1024 * 1024 + 1)
             if len(raw) > 2 * 1024 * 1024:
                 raise ValueError("The selected file is larger than 2 MiB.")
             if raw.startswith(b"psbt\xff"):
@@ -1457,43 +1436,22 @@ class ColdSignerDialog(QDialog):
     def _start_qr_scanner(self, target_field=None):
         if self.scanner:
             return
-        executable = shutil.which("zbarcam")
-        if not executable:
-            QMessageBox.information(
-                self,
-                "QR scanner unavailable",
-                "Install the Linux zbarcam utility (commonly provided by zbar-tools), then try again.",
-            )
-            return
-        self.scanner_buffer.clear()
         self.scanner_target_field = target_field
-        process = QProcess(self)
-        self.scanner = process
-        process.setProgram(executable)
-        process.setArguments(["--quiet", "--raw"])
-        process.readyReadStandardOutput.connect(self._scanner_data)
-        process.errorOccurred.connect(self._scanner_error)
-        process.start()
+        self.scanner = QRScanner(self)
+        self.scanner.decoded.connect(self._scanner_data)
+        self.scanner.failed.connect(self._scanner_error)
+        self.scanner.scan()
 
-    def _scanner_data(self):
-        if not self.scanner:
-            return
-        self.scanner_buffer.extend(bytes(self.scanner.readAllStandardOutput()))
-        if len(self.scanner_buffer) > 8192:
-            process, self.scanner = self.scanner, None
-            process.kill()
-            QMessageBox.warning(self, "QR payload too large", "This prototype accepts one QR payload up to 8 KiB.")
-            return
-        if b"\n" not in self.scanner_buffer:
-            return
-        payload = bytes(self.scanner_buffer).splitlines()[0].strip()
-        process, self.scanner = self.scanner, None
-        process.terminate()
-        process.deleteLater()
-        try:
-            text = payload.decode("ascii")
-        except UnicodeDecodeError:
-            QMessageBox.warning(self, "Unsupported QR payload", "This screen can’t use the scanned QR data.")
+    def _stop_scanner(self):
+        if self.scanner:
+            scanner, self.scanner = self.scanner, None
+            scanner.stop()
+            scanner.deleteLater()
+
+    def _scanner_data(self, text):
+        self._stop_scanner()
+        if not text.isascii():
+            QMessageBox.warning(self, "Unsupported QR payload", "Scan a Bitcoin address, public key or base64 PSBT.")
             return
         target_field, self.scanner_target_field = self.scanner_target_field, None
         if target_field is not None:
@@ -1528,10 +1486,9 @@ class ColdSignerDialog(QDialog):
         self.stack.setCurrentIndex(7)
         self._review_psbt()
 
-    def _scanner_error(self, error):
-        if error == QProcess.ProcessError.FailedToStart:
-            self.scanner = None
-            QMessageBox.warning(self, "QR scanner failed", "zbarcam could not open a camera. Check camera access and try again.")
+    def _scanner_error(self, message):
+        self._stop_scanner()
+        QMessageBox.warning(self, "QR scanner", message)
 
     def _verify_receive_address(self):
         raw = self.verify_address_input.text().strip()
@@ -1553,19 +1510,16 @@ class ColdSignerDialog(QDialog):
             self.verify_result.style().unpolish(self.verify_result)
             self.verify_result.style().polish(self.verify_result)
             self.verified_address_label.setEnabled(False)
-            self.address_used_checkbox.setEnabled(False)
             return
         self.verify_address_input.setText(address)
         if belongs:
             self.verify_result.setText(f"Address belongs to {self.wallet_display_name}.")
             self.verify_result.setProperty("verified", True)
             self.verified_address_label.setEnabled(True)
-            self.address_used_checkbox.setEnabled(True)
         else:
             self.verify_result.setText("This address does not belong to the current wallet.")
             self.verify_result.setProperty("verified", False)
             self.verified_address_label.setEnabled(False)
-            self.address_used_checkbox.setEnabled(False)
         self.verify_result.style().unpolish(self.verify_result)
         self.verify_result.style().polish(self.verify_result)
 
@@ -1573,15 +1527,14 @@ class ColdSignerDialog(QDialog):
         self.verify_result.clear()
         self.verify_result.setProperty("verified", False)
         self.verified_address_label.clear()
-        self.address_used_checkbox.setChecked(False)
         self.verified_address_label.setEnabled(False)
-        self.address_used_checkbox.setEnabled(False)
         self.verify_result.style().unpolish(self.verify_result)
         self.verify_result.style().polish(self.verify_result)
 
     def _review_psbt(self):
         if self.core is None:
             return
+        self._invalidate_psbt_review()
         text = self.psbt_input.toPlainText().strip()
         if not text or len(text) > 2 * 1024 * 1024:
             QMessageBox.warning(self, "PSBT size", "Enter a base64 PSBT smaller than 2 MiB.")
@@ -1599,6 +1552,7 @@ class ColdSignerDialog(QDialog):
         lines = [
             f"Transaction ID: {review['txid']}",
             f"Inputs: {review['inputs']}    Outputs: {len(review['outputs'])}",
+            f"Version: {review['version']}    Locktime: {review['locktime']}",
         ]
         if review["fee"] is None:
             lines.append("Fee: not available from this PSBT")
@@ -1634,16 +1588,18 @@ class ColdSignerDialog(QDialog):
             result = self.core.sign_psbt(self.reviewed_psbt, password, self.reviewed_txid)
         except ColdSetupError as exc:
             self.signer_password.clear()
+            self.sign_button.setEnabled(False)
             QMessageBox.warning(self, "Signing failed", str(exc))
             return
         self.signer_password.clear()
+        self.sign_button.setEnabled(False)
         self.signed_psbt.setPlainText(result["psbt"])
         completion = "All inputs have signatures" if result["complete"] else "Partially signed · additional signer(s) required"
         self.signed_status.setText(completion + ". The transaction was not finalized or broadcast.")
         try:
             self.signed_qr.setPixmap(self._qr_pixmap(result["psbt"]))
             self.signed_qr.show()
-        except qrcode.exceptions.DataOverflowError:
+        except DataOverflowError:
             self.signed_qr.hide()
             self.signed_status.setText(
                 completion + ". Too large for one QR code; save the signed PSBT to transfer it."
@@ -1687,35 +1643,10 @@ class ColdSignerDialog(QDialog):
         self.export_text.setPlainText(payload)
         self.stack.setCurrentIndex(self.export_page_index)
 
-    @staticmethod
-    def _qr_pixmap(payload, size=240):
-        target_size = size
-        code = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=1, border=4)
-        code.add_data(payload)
-        code.make(fit=True)
-        matrix = code.get_matrix()
-        size = len(matrix)
-        image = QImage(size, size, QImage.Format.Format_RGB32)
-        image.fill(QColor("white"))
-        painter = QPainter(image)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#142331"))
-        for y, row in enumerate(matrix):
-            for x, dark in enumerate(row):
-                if dark:
-                    painter.drawRect(QRect(x, y, 1, 1))
-        painter.end()
-        return QPixmap.fromImage(image).scaled(
-            max(size, target_size // size * size), max(size, target_size // size * size),
-            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
-        )
+    _qr_pixmap = staticmethod(qr_pixmap)
 
     def shutdown_core(self):
-        if self.scanner:
-            process, self.scanner = self.scanner, None
-            process.kill()
-            process.waitForFinished(3000)
-            process.deleteLater()
+        self._stop_scanner()
         for widget in (self.recovery_text,):
             widget.clear()
         for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):

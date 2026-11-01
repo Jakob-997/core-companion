@@ -122,7 +122,33 @@ def _latest_version():
     match = re.search(r"Latest version:\s*([0-9]+(?:\.[0-9]+){1,2})\b", visible)
     if not match:
         raise CoreDownloadError("Could not identify the current stable Core release.")
-    return match.group(1)
+    version = match.group(1)
+    if tuple(map(int, version.split("."))) < (32, 1):
+        raise CoreDownloadError("The download page offers a Core release older than the supported 32.1 minimum.")
+    return version
+
+
+def _verified_signers(directory, environment):
+    """Count distinct pinned primary keys, not repeated signature packets."""
+    code, status, _ = _run_gpg([
+        "--status-fd", "1", "--verify", str(directory / "SHA256SUMS.asc"),
+        str(directory / "SHA256SUMS"),
+    ], environment)
+    if code not in (0, 2):
+        raise CoreDownloadError("GPG could not verify the release checksums.")
+    signers = set()
+    for signature in status.split("[GNUPG:] NEWSIG"):
+        if any(f"[GNUPG:] {flag}" in signature for flag in ("EXPKEYSIG", "EXPSIG", "REVKEYSIG", "BADSIG", "ERRSIG")):
+            continue
+        for line in signature.splitlines():
+            fields = line.split()
+            if len(fields) >= 11 and fields[:2] == ["[GNUPG:]", "VALIDSIG"]:
+                primary = fields[-1] if len(fields) >= 12 else fields[2]
+                if primary in TRUSTED_RELEASE_SIGNERS:
+                    signers.add(primary)
+    if len(signers) < MINIMUM_TRUSTED_SIGNATURES:
+        raise CoreDownloadError("The checksums need three distinct, valid pinned release signers.")
+    return signers
 
 
 def _linux_target():
@@ -264,6 +290,7 @@ def download_and_verify():
             raise CoreDownloadError("The verifier did not confirm the expected Linux archive.")
 
         work_dir = temp_root / f"bitcoin_verify_binaries.{target}"
+        signers = _verified_signers(work_dir, environment)
         archive = (work_dir / expected_archive).resolve()
         if archive.parent != work_dir.resolve() or not archive.is_file():
             raise CoreDownloadError("The verified Bitcoin Core archive is missing.")
@@ -277,7 +304,7 @@ def download_and_verify():
             "ok": True,
             "version": version,
             "path": str(binary),
-            "trusted_signatures": len(trusted),
+            "trusted_signatures": len(signers),
             "archive_sha256": verified[expected_archive],
         }
     finally:

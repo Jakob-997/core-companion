@@ -21,7 +21,7 @@ def _session_environment():
 
 
 def _decode_mount_path(value):
-    return value.replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+    return value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
 
 
 def _mount_type(path):

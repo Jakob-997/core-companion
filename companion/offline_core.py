@@ -39,7 +39,7 @@ class ColdCoreRPC(CoreRPC):
         "setnetworkactive", "stop", "createwallet", "unloadwallet", "addhdkey", "setlabel",
         "derivehdkey", "createwalletdescriptor", "getdescriptorinfo",
         "importdescriptors", "walletpassphrase", "walletlock",
-        "walletprocesspsbt", "exportwatchonlywallet",
+        "walletprocesspsbt", "listdescriptors",
     })
 
 
@@ -57,6 +57,21 @@ class OfflineCore:
         self.process = None
         self.rpc = None
         self.port = None
+        self.reviewed_transaction = None
+        self.address_type = None
+
+    def _lock_wallet(self):
+        try:
+            self.rpc.call("walletlock", wallet="cold-signer")
+        except CoreError:
+            raise ColdSetupError("Core could not confirm the wallet is locked. Close this signer before continuing.") from None
+
+    @staticmethod
+    def _check_sighashes(decoded):
+        # NONE, SINGLE and ANYONECANPAY permit changes beyond this review.
+        if any(item.get("sighash", "ALL") not in ("ALL", "DEFAULT")
+               for item in decoded.get("inputs", [])):
+            raise ColdSetupError("Only ALL or Taproot DEFAULT signatures are supported. Request a new PSBT from the online wallet.")
 
     @staticmethod
     def _free_loopback_port():
@@ -79,12 +94,17 @@ class OfflineCore:
         self.directory = self.base / f"core-companion-cold-{self.session_id}"
         if self.directory.exists() or self.directory.is_symlink():
             raise ColdSetupError("A temporary cold-signer directory already exists; close stale sessions first.")
+        created_directory = False
         try:
             self.directory.mkdir(mode=stat.S_IRWXU)
+            created_directory = True
             wallet_dir = self.directory / "wallets"
             wallet_dir.mkdir(mode=stat.S_IRWXU)
         except OSError as exc:
-            self._remove_directory()
+            if created_directory:
+                self._remove_directory()
+            else:
+                self.directory = None
             raise ColdSetupError("Could not create private temporary storage in RAM.") from exc
         self.port = self._free_loopback_port()
         cookie = self.directory / ".cookie"
@@ -108,6 +128,8 @@ class OfflineCore:
             "-natpmp=0",
             "-listenonion=0",
             "-maxconnections=0",
+            "-networkactive=0",
+            "-walletbroadcast=0",
             f"-debuglogfile={log}",
         ]
         try:
@@ -185,6 +207,7 @@ class OfflineCore:
             if wallet_dir.exists() and loaded:
                 try:
                     self.rpc.call("unloadwallet", {"wallet_name": name})
+                    loaded = False
                 except CoreError:
                     pass
             if wallet_dir.exists() and not loaded:
@@ -198,24 +221,25 @@ class OfflineCore:
         if address_type not in ("legacy", "p2sh-segwit", "bech32", "bech32m"):
             raise ColdSetupError("Choose a supported Core single-signature address type.")
         name = "cold-signer"
-        wallet_dir = self.directory / "wallets" / name
         xprv = ""
+        created_wallet = False
         try:
             xprv = master_xprv(phrase, bip39_passphrase)
             self.rpc.call("createwallet", [name, False, True, wallet_passphrase or "", False, True, False, False])
+            created_wallet = True
             if wallet_passphrase:
                 self.rpc.call("walletpassphrase", [wallet_passphrase, 60], wallet=name)
             root = self.rpc.call("addhdkey", [xprv], wallet=name)
-            created = self.rpc.call("createwalletdescriptor", [address_type, {"hdkey": root["xpub"]}], wallet=name)
-            address = self.rpc.call("getnewaddress", [], wallet=name)
+            self.rpc.call("createwalletdescriptor", [address_type, {"hdkey": root["xpub"]}], wallet=name)
+            descriptors = self.rpc.call("listdescriptors", [False], wallet=name)["descriptors"]
+            address = self.rpc.call("getnewaddress", ["", address_type], wallet=name)
             address_info = self.rpc.call("getaddressinfo", [address], wallet=name)
             if not address_info.get("ismine"):
                 raise ColdSetupError("Core did not verify the generated address as part of this wallet.")
-            if wallet_passphrase:
-                self.rpc.call("walletlock", wallet=name)
+            self.address_type = address_type
             return {
                 "address": address,
-                "descriptors": created.get("descs", []),
+                "descriptors": [item["desc"] for item in sorted(descriptors, key=lambda item: item["internal"]) if item["active"]],
                 "address_info": address_info,
                 "wallet_name": name,
                 "encrypted": bool(wallet_passphrase),
@@ -225,6 +249,8 @@ class OfflineCore:
         finally:
             # Minimize references; the helper process must exit after the user finishes.
             xprv = ""
+            if wallet_passphrase and created_wallet:
+                self._lock_wallet()
 
     def create_multisig_wallet(
         self, phrase, threshold, other_signers, wallet_passphrase="", bip39_passphrase="", own_signer_label="This signer"
@@ -232,7 +258,7 @@ class OfflineCore:
         """Create an ephemeral BIP87 P2WSH descriptor wallet in Core."""
         if not isinstance(threshold, int) or not 1 <= threshold <= len(other_signers) + 1:
             raise ColdSetupError("The signing threshold must be between 1 and the signer count.")
-        if not 1 <= len(other_signers) + 1 <= 20:
+        if not 2 <= len(other_signers) + 1 <= 20:
             raise ColdSetupError("Native multisig supports between 2 and 20 signers in this flow.")
         normalized = [normalize_bip87_account_key(item["key"]) for item in other_signers]
         external_xpubs = [key.split("]", 1)[1] for key in normalized]
@@ -242,9 +268,11 @@ class OfflineCore:
         name = "cold-signer"
         root_xprv = ""
         account = {}
+        created_wallet = False
         try:
             root_xprv = master_xprv(phrase, bip39_passphrase)
             self.rpc.call("createwallet", [name, False, True, wallet_passphrase or "", False, True, False, False])
+            created_wallet = True
             if wallet_passphrase:
                 self.rpc.call("walletpassphrase", [wallet_passphrase, 90], wallet=name)
             root = self.rpc.call("addhdkey", [root_xprv], wallet=name)
@@ -277,7 +305,9 @@ class OfflineCore:
                 if checked_public.get("hasprivatekeys") is not False:
                     raise ColdSetupError("The public recovery descriptor unexpectedly contains private keys.")
                 requests.append({
-                    "desc": checked_private["descriptor"],
+                    # Core normalizes "descriptor" to PUBLIC keys. Its checksum
+                    # applies to our original private descriptor; keep that key.
+                    "desc": private_descriptor + "#" + checked_private["checksum"],
                     "timestamp": "now",
                     "active": True,
                     "internal": internal,
@@ -293,8 +323,7 @@ class OfflineCore:
             address_info = self.rpc.call("getaddressinfo", [address], wallet=name)
             if address_info.get("ismine") is not True:
                 raise ColdSetupError("Core did not verify the generated multisig address as part of this wallet.")
-            if wallet_passphrase:
-                self.rpc.call("walletlock", wallet=name)
+            self.address_type = "bech32"
             return {
                 "address": address,
                 "descriptors": public_descriptors,
@@ -317,9 +346,12 @@ class OfflineCore:
             root_xprv = ""
             if isinstance(account, dict):
                 account["xprv"] = ""
+            if wallet_passphrase and created_wallet:
+                self._lock_wallet()
 
     def review_psbt(self, psbt):
         """Ask Core to enrich and inspect a PSBT without signing it."""
+        self.reviewed_transaction = None
         if not isinstance(psbt, str) or not psbt.strip() or len(psbt) > 2 * 1024 * 1024:
             raise ColdSetupError("Enter a base64 PSBT smaller than 2 MiB.")
         try:
@@ -333,6 +365,9 @@ class OfflineCore:
         except (CoreError, KeyError, TypeError):
             raise ColdSetupError("Core could not safely decode and inspect this PSBT.") from None
 
+        self._check_sighashes(decoded)
+        if analysis.get("error"):
+            raise ColdSetupError("Core reports that this PSBT is invalid. Request a new PSBT.")
         transaction = decoded.get("tx", {})
         txid = transaction.get("txid")
         if not isinstance(txid, str) or not txid:
@@ -345,7 +380,7 @@ class OfflineCore:
                 "Core cannot verify the previous-output amount for every input. "
                 "Do not sign this PSBT; use one that includes verified UTXO data."
             )
-        if decoded.get("fee") is None:
+        if decoded.get("fee") is None or decoded["fee"] < 0:
             raise ColdSetupError("Core could not calculate the transaction fee from this PSBT.")
         outputs = []
         for output in transaction.get("vout", []):
@@ -373,6 +408,7 @@ class OfflineCore:
                 "is_mine": mine,
                 "is_change": change,
             })
+        self.reviewed_transaction = (updated["psbt"], txid)
         return {
             "psbt": updated["psbt"],
             "unsigned_txid": txid,
@@ -389,10 +425,11 @@ class OfflineCore:
         """Sign only the reviewed unsigned transaction; never finalize or broadcast."""
         if not isinstance(psbt, str) or not psbt.strip() or len(psbt) > 2 * 1024 * 1024:
             raise ColdSetupError("The reviewed PSBT is empty or exceeds the 2 MiB limit.")
-        if not expected_unsigned_txid:
-            raise ColdSetupError("Review the transaction before signing.")
+        if self.reviewed_transaction != (psbt.strip(), expected_unsigned_txid):
+            raise ColdSetupError("Review this exact PSBT before signing.")
         try:
             before = self.rpc.call("decodepsbt", [psbt.strip()])
+            self._check_sighashes(before)
             if before.get("tx", {}).get("txid") != expected_unsigned_txid:
                 raise ColdSetupError("The unsigned transaction changed after review. Review it again before signing.")
             if wallet_passphrase:
@@ -411,32 +448,9 @@ class OfflineCore:
         except (KeyError, TypeError):
             raise ColdSetupError("Core returned an incomplete PSBT signing response.") from None
         finally:
+            self.reviewed_transaction = None
             if wallet_passphrase:
-                try:
-                    self.rpc.call("walletlock", wallet="cold-signer")
-                except CoreError:
-                    pass
-
-    def export_watchonly_wallet(self, destination):
-        """Ask Core to export only public wallet data to a user-selected file."""
-        selected = Path(destination).expanduser()
-        if selected.is_symlink():
-            raise ColdSetupError("Choose a destination that is not a symbolic link.")
-        path = selected.resolve()
-        if not path.is_absolute():
-            raise ColdSetupError("Choose an absolute destination for the watch-only wallet file.")
-        if path.exists() or path.is_symlink() or path.is_dir():
-            raise ColdSetupError("The selected destination already exists. Choose a new filename.")
-        if not path.parent.is_dir():
-            raise ColdSetupError("The selected destination folder does not exist.")
-        try:
-            result = self.rpc.call("exportwatchonlywallet", [str(path)], wallet="cold-signer")
-        except CoreError:
-            raise ColdSetupError("Bitcoin Core could not export the watch-only wallet file.") from None
-        exported = result.get("exported_file") if isinstance(result, dict) else None
-        if not isinstance(exported, str) or Path(exported) != path:
-            raise ColdSetupError("Core returned an unexpected watch-only export path.")
-        return exported
+                self._lock_wallet()
 
     def verify_address(self, address):
         """Return whether Core recognizes an address as belonging to this wallet."""
@@ -453,7 +467,7 @@ class OfflineCore:
         if not isinstance(label, str) or len(label) > 128:
             raise ColdSetupError("Address labels must be 128 characters or fewer.")
         try:
-            address = self.rpc.call("getnewaddress", [label], wallet="cold-signer")
+            address = self.rpc.call("getnewaddress", [label, self.address_type], wallet="cold-signer")
             info = self.rpc.call("getaddressinfo", [address], wallet="cold-signer")
         except CoreError:
             raise ColdSetupError("Core could not generate a receive address.") from None

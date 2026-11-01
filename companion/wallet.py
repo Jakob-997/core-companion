@@ -1,6 +1,7 @@
 """Wallet orchestration only: Core owns balances, addresses and transactions."""
 
 from decimal import Decimal
+import re
 from .rpc import CoreError
 
 
@@ -13,7 +14,7 @@ class WalletService:
         self.rpc = rpc
 
     def import_public_wallet(self, name, descriptors):
-        if not name or len(name) > 80 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_" for c in name):
+        if not isinstance(name, str) or not re.fullmatch(r"[\w -]{1,80}", name):
             raise CoreError("Use a wallet name with letters, numbers, spaces, hyphens or underscores.")
         if not isinstance(descriptors, list) or not 1 <= len(descriptors) <= 2:
             raise CoreError("Import one receive descriptor, or receive and change descriptors in that order.")
@@ -22,16 +23,20 @@ class WalletService:
             if not isinstance(descriptor, str) or len(descriptor) > 20000:
                 raise CoreError("Invalid public descriptor.")
             checked = self.rpc.call("getdescriptorinfo", [descriptor])
-            if checked.get("hasprivatekeys") is not False or checked.get("isrange") is not True:
+            if checked.get("hasprivatekeys") is not False or checked.get("isrange") is not True or checked.get("issolvable") is not True:
                 raise CoreError("Import requires ranged public descriptors without private keys.")
+            if any(item["desc"] == checked["descriptor"] for item in requests):
+                raise CoreError("Receive and change descriptors must be different.")
             requests.append({"desc": checked["descriptor"], "timestamp": 0,
                              "active": True, "internal": index == 1, "range": [0, 1000]})
         self.rpc.call("createwallet", {"wallet_name": name, "disable_private_keys": True, "blank": True})
         result = self.rpc.call("importdescriptors", [requests], wallet=name, timeout=3600)
-        if not isinstance(result, list) or len(result) != len(requests) or any(item.get("success") is not True for item in result):
-            details = "; ".join(str(item.get("error", {}).get("message", "Import failed"))
-                                for item in result if item.get("success") is not True) if isinstance(result, list) else "Invalid Core response"
-            raise CoreError(f"Core could not finish the import: {details}. The new wallet remains loaded.")
+        if not isinstance(result, list) or len(result) != len(requests) or any(not isinstance(item, dict) for item in result):
+            raise CoreError("Core returned an invalid import response. The new wallet remains loaded.")
+        failures = [item.get("error", {}).get("message", "Import failed")
+                    for item in result if item.get("success") is not True]
+        if failures:
+            raise CoreError(f"Core could not finish the import: {'; '.join(map(str, failures))}. The new wallet remains loaded.")
         return self.connect()
 
     def connect(self):
@@ -57,8 +62,18 @@ class WalletService:
         }
 
     def receive(self, name, label):
-        # Core chooses the wallet's default address type, including multisig.
-        address = self.rpc.call("getnewaddress", {"label": label}, wallet=name)
+        params = {"label": label}
+        active = [item["desc"] for item in self.rpc.call("listdescriptors", [False], wallet=name)["descriptors"]
+                  if item["active"] and not item["internal"]]
+        # Imported wallets can contain only Taproot or legacy descriptors while
+        # Core's global default remains bech32. Use the imported type explicitly.
+        if len(active) == 1:
+            for prefix, address_type in (("tr(", "bech32m"), ("wpkh(", "bech32"),
+                                         ("wsh(", "bech32"), ("sh(", "p2sh-segwit"), ("pkh(", "legacy")):
+                if active[0].startswith(prefix):
+                    params["address_type"] = address_type
+                    break
+        address = self.rpc.call("getnewaddress", params, wallet=name)
         info = self.rpc.call("getaddressinfo", {"address": address}, wallet=name)
         return address, info
 

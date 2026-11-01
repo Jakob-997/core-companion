@@ -13,15 +13,15 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QRect
-from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPixmap
+from PySide6.QtCore import Qt, QProcess, QTimer, QEvent
+from PySide6.QtGui import QAction, QColor, QFont
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
-    QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip,
-    QSizePolicy)
+    QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip)
 from PySide6.QtWidgets import QMessageBox
-import qrcode
+from .qr import qr_pixmap
+from .scanner import QRScanner
 from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession
@@ -33,6 +33,7 @@ PRUNE_TARGET_MIB = 10000
 
 def label(text, name=None):
     widget = QLabel(text)
+    widget.setTextFormat(Qt.TextFormat.PlainText)
     if name:
         widget.setObjectName(name)
     return widget
@@ -69,13 +70,7 @@ def managed_node_dir():
 def page_layout(top=20, bottom=16, name="Page"):
     page = QWidget()
     page.setObjectName(name)
-    shell = QVBoxLayout(page)
-    shell.setContentsMargins(0, 0, 0, 0)
-    content = QWidget()
-    content.setObjectName("PageContent")
-    content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-    shell.addWidget(content, 1)
-    layout = QVBoxLayout(content)
+    layout = QVBoxLayout(page)
     layout.setContentsMargins(30, top, 30, bottom)
     layout.setSpacing(14)
     return page, layout
@@ -431,6 +426,7 @@ class App(QMainWindow):
             self.start_cold_signer()
         elif self.mode_choice == "online":
             if self.service:
+                self.sync_timer.start()
                 self.tabs.setCurrentIndex(2)
             else:
                 self.connection_purpose = "online"
@@ -663,8 +659,10 @@ class App(QMainWindow):
 
     def _installed_core_binary(self):
         root = companion_data_dir() / "bitcoin-core"
-        binaries = [path for path in root.glob("*/bin/bitcoind") if path.is_file() and os.access(path, os.X_OK)]
-        return max(binaries, key=lambda path: path.stat().st_mtime) if binaries else None
+        binaries = [path for path in root.glob("*/bin/bitcoind")
+                    if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", path.parent.parent.name)
+                    and path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)]
+        return max(binaries, key=lambda path: tuple(map(int, path.parent.parent.name.split(".")))) if binaries else None
 
     def _import_wallet_dialog(self):
         if self.service is None:
@@ -680,40 +678,20 @@ class App(QMainWindow):
         payload = QPlainTextEdit()
         payload.setPlaceholderText("Scan the cold signer’s public wallet QR, or paste public descriptors")
         layout.addWidget(payload)
-        scanner = QProcess(dialog)
-        scan = button("Scan QR", lambda: start_scan())
-        scan.setToolTip("Read the public wallet descriptors using your camera.")
-        layout.addWidget(scan)
-        buffer = bytearray()
+        scanner = QRScanner(dialog)
+        layout.addWidget(button("Scan QR", scanner.scan))
 
-        def start_scan():
-            executable = shutil.which("zbarcam")
-            if not executable:
-                QMessageBox.information(dialog, "Camera scanner", "Install zbar-tools to scan with a camera, or paste the public descriptors.")
-                return
-            if scanner.state() == QProcess.ProcessState.NotRunning:
-                buffer.clear()
-                scanner.start(executable, ["--quiet", "--raw"])
+        def read_scan(text):
+            payload.setPlainText(text)
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    name.setText(str(data.get("name", "")))
+            except ValueError:
+                pass
 
-        def read_scan():
-            buffer.extend(bytes(scanner.readAllStandardOutput()))
-            if len(buffer) > 65536:
-                scanner.kill()
-                buffer.clear()
-                return
-            if b"\n" in buffer:
-                text = bytes(buffer).split(b"\n", 1)[0].decode("utf-8", "replace").strip()
-                payload.setPlainText(text)
-                try:
-                    data = json.loads(text)
-                    if isinstance(data, dict):
-                        name.setText(str(data.get("name", "")))
-                except ValueError:
-                    pass
-                scanner.kill()
-
-        scanner.readyReadStandardOutput.connect(read_scan)
-        scanner.errorOccurred.connect(lambda error: QMessageBox.warning(dialog, "Scanner unavailable", "Could not start the camera scanner.") if error == QProcess.ProcessError.FailedToStart else None)
+        scanner.decoded.connect(read_scan)
+        scanner.failed.connect(lambda message: QMessageBox.warning(dialog, "QR scanner", message))
 
         def do_import():
             text = payload.toPlainText().strip()
@@ -730,11 +708,11 @@ class App(QMainWindow):
                 return
             wallet_name = name.text().strip() or str(data.get("name", "")).strip()
             service = self.service
-            scanner.kill()
+            scanner.stop()
             dialog.accept()
             self.task("Importing wallet and scanning blockchain history…",
                       lambda: service.import_public_wallet(wallet_name, descriptors),
-                      lambda result: self.connected(service, result))
+                      lambda result: self.connected(service, result, wallet_name))
 
         footer = QHBoxLayout()
         footer.addWidget(button("Back", dialog.reject))
@@ -742,9 +720,7 @@ class App(QMainWindow):
         footer.addWidget(button("Import wallet", do_import, True))
         layout.addLayout(footer)
         dialog.exec()
-        if scanner.state() != QProcess.ProcessState.NotRunning:
-            scanner.kill()
-            scanner.waitForFinished(3000)
+        scanner.stop()
 
     def download_bitcoin_core(self):
         if sys.platform != "linux":
@@ -783,7 +759,7 @@ class App(QMainWindow):
         process.start(sys.executable, [str(Path(__file__).with_name("core_download.py"))])
 
     def _read_core_download_error(self, process):
-        self.core_download_stderr += bytes(process.readAllStandardError()).decode("utf-8", "replace")
+        self.core_download_stderr = (self.core_download_stderr + bytes(process.readAllStandardError()).decode("utf-8", "replace"))[-6000:]
 
     def _finish_core_download_ui(self, process):
         self._read_core_download_error(process)
@@ -849,10 +825,9 @@ class App(QMainWindow):
         data_dir = managed_node_dir()
         cookie = data_dir / ".cookie"
         self._use_core_connection(cookie, MANAGED_RPC_PORT)
-        if cookie.is_file():
+        if prefer_existing and cookie.is_file():
             self._set_core_status("Connecting to your Bitcoin Core node…")
-            self.node_start_timer.start()
-            self._poll_managed_node()
+            self.connect()
             return
 
         try:
@@ -860,6 +835,10 @@ class App(QMainWindow):
             data_dir.chmod(0o700)
             arguments = [
                 f"-datadir={data_dir}",
+                "-conf=/dev/null",
+                "-chain=main",
+                "-rpcbind=127.0.0.1",
+                "-rpcallowip=127.0.0.1",
                 "-daemon=0",
                 "-server=1",
                 f"-prune={PRUNE_TARGET_MIB}",
@@ -880,10 +859,16 @@ class App(QMainWindow):
 
         self._set_core_status("Starting Bitcoin Core and connecting…")
         self.statusBar().showMessage("Bitcoin Core is starting. Initial blockchain sync will continue in the background.")
+        self.node_start_deadline = time.monotonic() + 90
         self.node_start_timer.start()
         self._poll_managed_node()
 
     def _poll_managed_node(self):
+        if time.monotonic() >= self.node_start_deadline:
+            self.node_start_timer.stop()
+            self._set_core_status("Core has not connected yet", "error")
+            self.statusBar().showMessage("Core may still be starting. Try Connect again or review its startup log.")
+            return
         if self.managed_core_process is not None and self.managed_core_process.poll() is not None:
             self.node_start_timer.stop()
             self.managed_core_process = None
@@ -991,6 +976,8 @@ class App(QMainWindow):
                 QMessageBox.critical(self, "Cold signer could not start", str(exc))
             return
         self.cold_session_id = secrets.token_hex(16)
+        self.sync_timer.stop()
+        self.node_start_timer.stop()
         self.cold_temp_path = Path("/dev/shm") / f"core-companion-cold-{self.cold_session_id}"
         self.cold_button.setEnabled(False)
         self.cold_button_top.setEnabled(False)
@@ -1157,6 +1144,10 @@ class App(QMainWindow):
             if self.connection_fallback:
                 self.connection_fallback = False
                 self.core_cookie_path = None
+                if self.mode_choice != "online":
+                    self._set_core_status("Bitcoin Core is ready. Choose a wallet mode.")
+                    self.statusBar().showMessage("The previous node is not running. Online Node will start it when selected.")
+                    return
                 self.statusBar().showMessage("Starting the verified Bitcoin Core node…")
                 QTimer.singleShot(0, lambda: self._start_managed_node(prefer_existing=False))
                 return
@@ -1227,7 +1218,8 @@ class App(QMainWindow):
                 return
             self.connection_fallback = (
                 sys.platform == "linux"
-                and cookie_path == default_cookie_path()
+                and not self.node_start_timer.isActive()
+                and cookie_path in (default_cookie_path(), managed_node_dir() / ".cookie")
                 and self._installed_core_binary() is not None
             )
             service = WalletService(CoreRPC(self.port.text(), cookie_path))
@@ -1267,7 +1259,7 @@ class App(QMainWindow):
             show_message=False,
         )
 
-    def connected(self, service, data):
+    def connected(self, service, data, selected_wallet=None):
         self.connection_fallback = False
         self.node_start_timer.stop()
         if data["chain"].get("chain") != "main":
@@ -1282,7 +1274,10 @@ class App(QMainWindow):
         self.update_sync_status(data["chain"])
         self.sync_timer.start()
         self.wallet_picker.blockSignals(True)
+        self.wallet_picker.clear()
         self.wallet_picker.addItems(data["wallets"])
+        if selected_wallet:
+            self.wallet_picker.setCurrentText(selected_wallet)
         self.wallet_picker.blockSignals(False)
         if data["wallets"]:
             self.refresh()
@@ -1415,27 +1410,7 @@ class App(QMainWindow):
         self.generate_button.hide()
         self.statusBar().showMessage("Address generated by Core. Verify independently before use.")
 
-    @staticmethod
-    def _qr_pixmap(payload, size=190):
-        code = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=1, border=4)
-        code.add_data(payload)
-        code.make(fit=True)
-        matrix = code.get_matrix()
-        image = QImage(len(matrix), len(matrix), QImage.Format.Format_RGB32)
-        image.fill(QColor("white"))
-        painter = QPainter(image)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#142331"))
-        for y, row in enumerate(matrix):
-            for x, dark in enumerate(row):
-                if dark:
-                    painter.drawRect(QRect(x, y, 1, 1))
-        painter.end()
-        return QPixmap.fromImage(image).scaled(
-            max(len(matrix), size // len(matrix) * len(matrix)),
-            max(len(matrix), size // len(matrix) * len(matrix)),
-            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
-        )
+    _qr_pixmap = staticmethod(qr_pixmap)
 
     def copy_address(self):
         address = self.address.text()

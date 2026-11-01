@@ -40,7 +40,8 @@ Choose **Online Node** to start the verified Core automatically. Companion uses
 its own node folder, a local cookie, loopback RPC and a 10,000 MiB pruning
 target; blockchain sync starts immediately and continues after Companion closes.
 If a cookie is present in Core's standard data directory, Companion tries that
-node first and starts its verified node automatically if the connection fails.
+node first. If that connection fails, selecting Online Node starts its verified
+node automatically; cold setup does not start online peer networking.
 Downloading Core alone does not start networking, so it is safe to download it
 before setting up a cold signer. The verified binary is also available to the
 cold signer.
@@ -81,6 +82,10 @@ host isolation: other programs can still access the network. Use test wallets
 only. Remove this flag before preparing any release build.
 
 ## Included in this scaffold
+
+See [AUDIT.md](AUDIT.md) for the implementation review, validation performed,
+and remaining security and packaging work. [ARCHITECTURE.md](ARCHITECTURE.md)
+maps the Core boundary and the seed/signing flow.
 
 - Existing-node wallet view: balances, history, receiving addresses, labels,
   address generation and Core PSBT inspection.

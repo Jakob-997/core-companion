@@ -25,6 +25,7 @@ class CoreRPC:
         "getbalances", "listtransactions", "listreceivedbyaddress",
         "getnewaddress", "getaddressinfo", "decodepsbt", "analyzepsbt",
         "getdescriptorinfo", "createwallet", "importdescriptors",
+        "listdescriptors",
     })
 
     def __init__(self, port, cookie_path):
@@ -40,17 +41,18 @@ class CoreRPC:
 
     def call(self, method, params=None, wallet=None, *, timeout=12):
         if method not in self.METHODS:
-            raise CoreError("This RPC operation is not enabled in the scaffold.")
+            raise CoreError("This RPC operation is not enabled.")
         try:
-            cookie = self.cookie_path.read_text(encoding="utf-8").strip()
-        except OSError:
+            with self.cookie_path.open(encoding="ascii") as cookie_file:
+                cookie = cookie_file.read(4097).strip()
+        except (OSError, UnicodeError):
             raise CoreError("Could not find Core's local connection. Start Core on this computer and try again.") from None
-        if ":" not in cookie or "\n" in cookie or "\r" in cookie:
+        if len(cookie) > 4096 or ":" not in cookie or any(ord(c) < 33 or ord(c) > 126 for c in cookie):
             raise CoreError("Core's local connection could not be read. Restart Core and try again.")
         path = "/" if wallet is None else "/wallet/" + quote(wallet, safe="")
         request = Request(
             f"http://127.0.0.1:{self.port}{path}",
-            data=json.dumps({"jsonrpc": "2.0", "id": "companion", "method": method, "params": params or {}}).encode(),
+            data=json.dumps({"jsonrpc": "2.0", "id": "companion", "method": method, "params": {} if params is None else params}, allow_nan=False).encode(),
             headers={"Content-Type": "application/json", "Authorization": "Basic " + base64.b64encode(cookie.encode()).decode()},
         )
         try:
@@ -69,15 +71,21 @@ class CoreRPC:
             with response:
                 body = response.read(8 * 1024 * 1024 + 1)
             if len(body) > 8 * 1024 * 1024:
-                raise CoreError("Core response exceeded the scaffold's 8 MiB limit.")
-            result = json.loads(body, parse_float=Decimal)
+                raise CoreError("Core response exceeded the 8 MiB limit.")
+            result = json.loads(body, parse_float=Decimal, parse_constant=_reject_constant)
         except (ValueError, OSError, TimeoutError):
             raise CoreError("Core returned an unreadable response.") from None
         if not isinstance(result, dict) or result.get("id") != "companion":
             raise CoreError("Unexpected RPC response.")
         if result.get("error"):
             error = result["error"]
+            if not isinstance(error, dict):
+                raise CoreError("Core returned an invalid error response.")
             raise CoreError(f"Core error {error.get('code')}: {error.get('message', 'Request failed')}")
         if "result" not in result:
             raise CoreError("Core response is missing a result.")
         return result["result"]
+
+
+def _reject_constant(value):
+    raise ValueError(f"Non-finite JSON number: {value}")
