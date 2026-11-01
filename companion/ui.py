@@ -17,14 +17,15 @@ from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
-    QFormLayout, QFileDialog, QPlainTextEdit, QFrame, QProgressBar, QToolTip)
+    QFormLayout, QFileDialog, QPlainTextEdit, QFrame, QProgressBar, QToolTip,
+    QSizePolicy)
 from PySide6.QtWidgets import QMessageBox
 import qrcode
 from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession
 from .theme import stylesheet
-from .widgets import ActionRow
+from .widgets import ActionRow, ChoiceRow
 
 def label(text, name=None):
     widget = QLabel(text)
@@ -40,6 +41,24 @@ def button(text, action, primary=False):
     widget.setCursor(Qt.CursorShape.PointingHandCursor)
     return widget
 
+
+def centered_page(width=930, top=20, bottom=16, name="Page"):
+    page = QWidget()
+    page.setObjectName(name)
+    shell = QHBoxLayout(page)
+    shell.setContentsMargins(0, 0, 0, 0)
+    shell.addStretch(1)
+    content = QWidget()
+    content.setObjectName("PageContent")
+    content.setMaximumWidth(width)
+    content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    shell.addWidget(content, 1)
+    shell.addStretch(1)
+    layout = QVBoxLayout(content)
+    layout.setContentsMargins(0, top, 0, bottom)
+    layout.setSpacing(14)
+    return page, layout
+
 class App(QMainWindow):
     def __init__(self, dev_keep_network=False):
         super().__init__()
@@ -51,6 +70,7 @@ class App(QMainWindow):
         self.help_mode = False
         self.mode_choice = None
         self.connection_purpose = "welcome"
+        self.cold_notice_previous = 1
         self.setStyleSheet(stylesheet())
         self.service = None
         self.busy = False
@@ -123,6 +143,7 @@ class App(QMainWindow):
         self._receive()
         self._addresses()
         self._tools()
+        self._cold_network_page()
         self.network = label("○  Offline", "Muted")
         self.statusBar().addPermanentWidget(self.network)
         self.cold_button_top = self.mode_continue
@@ -132,15 +153,10 @@ class App(QMainWindow):
         self.tabs.setCurrentIndex(0)
 
     def _welcome(self):
-        page = QWidget()
-        page.setObjectName("OnboardingPage")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(30, 32, 30, 26)
-        layout.setSpacing(12)
+        page, layout = centered_page(770, 32, 26, "OnboardingPage")
         layout.addWidget(label("Welcome", "Eyebrow"))
         title = label("Connect to Bitcoin Core", "Title")
         layout.addWidget(title)
-        layout.addWidget(label("Use your local Core node for wallet activity. A cold signer starts its own temporary Core session.", "Muted"))
         card = QFrame()
         card.setObjectName("Card")
         card_layout = QVBoxLayout(card)
@@ -163,29 +179,29 @@ class App(QMainWindow):
         self.tabs.addTab(page, "Welcome")
 
     def _mode_page(self):
-        page = QWidget()
-        page.setObjectName("OnboardingPage")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(30, 28, 30, 26)
-        layout.setSpacing(12)
+        page, layout = centered_page(780, 30, 26, "OnboardingPage")
         layout.addWidget(label("Choose a wallet mode", "Title"))
-        layout.addWidget(label("", "Muted"))
-        choices = QHBoxLayout()
-        choices.setSpacing(16)
-        self.cold_choice = QPushButton("❄\n\nCold storage\n(private keys)")
-        self.cold_choice.setObjectName("ColdMode")
-        self.cold_choice.setCheckable(True)
-        self.cold_choice.setMinimumHeight(190)
+        choices = QVBoxLayout()
+        choices.setSpacing(0)
+        self.cold_choice = ChoiceRow("❄", "Cold storage (private keys)", accent="blue")
         self.cold_choice.clicked.connect(lambda: self._select_mode("cold"))
-        self.online_choice = QPushButton("◉\n\nOnline node\n(watch only)")
-        self.online_choice.setObjectName("OnlineMode")
-        self.online_choice.setCheckable(True)
-        self.online_choice.setMinimumHeight(190)
+        self.online_choice = ChoiceRow("◉", "Online node (watch only)", accent="red")
         self.online_choice.clicked.connect(lambda: self._select_mode("online"))
-        choices.addWidget(self.cold_choice, 1)
-        divider = label("OR", "Muted")
-        choices.addWidget(divider)
-        choices.addWidget(self.online_choice, 1)
+        choices.addWidget(self.cold_choice)
+        divider = QHBoxLayout()
+        divider.setContentsMargins(0, 5, 0, 5)
+        divider.addStretch(1)
+        left_rule = QFrame()
+        left_rule.setFrameShape(QFrame.Shape.HLine)
+        left_rule.setObjectName("ChoiceDivider")
+        right_rule = QFrame()
+        right_rule.setFrameShape(QFrame.Shape.HLine)
+        right_rule.setObjectName("ChoiceDivider")
+        divider.addWidget(left_rule, 1)
+        divider.addWidget(label("OR", "Muted"))
+        divider.addWidget(right_rule, 1)
+        choices.addLayout(divider)
+        choices.addWidget(self.online_choice)
         layout.addLayout(choices)
         layout.addStretch()
         row = QHBoxLayout()
@@ -197,11 +213,43 @@ class App(QMainWindow):
         layout.addLayout(row)
         self.tabs.addTab(page, "Mode")
 
+    def _cold_network_page(self):
+        page, layout = centered_page(770, 32, 26, "OnboardingPage")
+        layout.addWidget(label("Cold storage", "Eyebrow"))
+        layout.addWidget(label(
+            "Cold signer test mode" if self.dev_keep_network else "Keep this computer offline",
+            "Title",
+        ))
+        notice = QFrame()
+        notice.setObjectName("ColdNotice")
+        notice_layout = QVBoxLayout(notice)
+        notice_layout.setContentsMargins(16, 14, 16, 14)
+        notice_layout.setSpacing(6)
+        notice_layout.addWidget(label(
+            "Computer networking stays on" if self.dev_keep_network else "Network access will be disabled",
+            "Heading",
+        ))
+        if self.dev_keep_network:
+            detail = "Bitcoin Core peer networking remains off. Swap is still disabled. Use test wallets only."
+        else:
+            detail = "Swap will also be disabled. Close other programs first; on a low-memory computer, the desktop may freeze."
+        notice_layout.addWidget(label(detail, "Muted"))
+        layout.addWidget(notice)
+        layout.addStretch(1)
+        footer = QHBoxLayout()
+        footer.addWidget(button("‹  Back", self._back_from_cold_notice))
+        footer.addStretch()
+        continue_button = button("Continue", self._begin_cold_signer, True)
+        continue_button.setObjectName("ColdContinue")
+        footer.addWidget(continue_button)
+        layout.addLayout(footer)
+        self.tabs.addTab(page, "Cold storage")
+
+    def _back_from_cold_notice(self):
+        self.tabs.setCurrentIndex(self.cold_notice_previous)
+
     def _online_home(self):
-        page = QWidget()
-        page.setObjectName("Page")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 20, 24, 18)
+        page, layout = centered_page(930, 20, 18, "OnlinePage")
         layout.setSpacing(10)
         title_row = QHBoxLayout()
         title_row.addWidget(label("Watch-only wallet", "Eyebrow"))
@@ -239,13 +287,25 @@ class App(QMainWindow):
         layout.addLayout(kpis)
         actions = QVBoxLayout()
         actions.setSpacing(8)
-        receive_action = ActionRow("↓", "Receive Bitcoin", "Create an address and QR code in Bitcoin Core.", primary=True)
+        receive_action = ActionRow(
+            "↓", "Receive Bitcoin", "", primary=True,
+            tooltip="Create an address and QR code using Bitcoin Core.",
+        )
         receive_action.clicked.connect(self._open_receive)
-        send_action = ActionRow("⇧", "Wallet activity", "Review wallet transactions and confirmations.")
+        send_action = ActionRow(
+            "⇧", "Wallet activity", "",
+            tooltip="Review wallet transactions and confirmations.", icon_key="activity",
+        )
         send_action.clicked.connect(lambda: self.tabs.setCurrentIndex(3))
-        addresses_action = ActionRow("▣", "View addresses & labels", "Browse addresses known to the selected Core wallet.")
+        addresses_action = ActionRow(
+            "▣", "View addresses & labels", "",
+            tooltip="Browse addresses known to the selected Core wallet.",
+        )
         addresses_action.clicked.connect(lambda: self.tabs.setCurrentIndex(5))
-        tools_action = ActionRow("⚙", "Tools & Settings", "Inspect a PSBT or start a separate cold signer session.")
+        tools_action = ActionRow(
+            "⚙", "Tools & Settings", "",
+            tooltip="Inspect a PSBT or start a separate cold signer session.",
+        )
         tools_action.clicked.connect(lambda: self.tabs.setCurrentIndex(6))
         for action in (receive_action, send_action, addresses_action, tools_action):
             actions.addWidget(action)
@@ -278,7 +338,7 @@ class App(QMainWindow):
         self.mode_choice = mode
         self.cold_choice.setChecked(mode == "cold")
         self.online_choice.setChecked(mode == "online")
-        self.mode_continue.setObjectName("ColdContinue" if mode == "cold" else "Primary")
+        self.mode_continue.setObjectName("ColdContinue" if mode == "cold" else "OnlineContinue")
         self.mode_continue.style().unpolish(self.mode_continue)
         self.mode_continue.style().polish(self.mode_continue)
         self.mode_continue.setEnabled(True)
@@ -326,11 +386,7 @@ class App(QMainWindow):
         return super().eventFilter(watched, event)
 
     def page(self, title):
-        widget = QWidget()
-        widget.setObjectName("Page")
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(20, 20, 20, 16)
-        layout.setSpacing(14)
+        widget, layout = centered_page(930, 20, 16)
         self.tabs.addTab(widget, title)
         return layout
 
@@ -522,37 +578,6 @@ class App(QMainWindow):
         if path:
             self.cookie.setText(path)
 
-    def _cold_network_notice(self):
-        dialog = QDialog(self)
-        dialog.setObjectName("ColdSigner")
-        dialog.setWindowTitle("Cold storage")
-        dialog.setMinimumWidth(470)
-        dialog.setStyleSheet(stylesheet(self.dark_mode))
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(12)
-        layout.addWidget(label("Cold storage", "Eyebrow"))
-        layout.addWidget(label(
-            "Core peer networking will be disabled" if self.dev_keep_network else "Network access will be disabled",
-            "Title",
-        ))
-        if self.dev_keep_network:
-            detail = "Development mode keeps host networking on. Bitcoin Core peer networking stays off; swap is disabled. Use test wallets only."
-        else:
-            detail = "Swap will also be disabled for this session. Close other programs first; on a low-memory computer, the desktop may freeze."
-        note = QFrame()
-        note.setObjectName("ColdNotice")
-        note_layout = QVBoxLayout(note)
-        note_layout.setContentsMargins(14, 12, 14, 12)
-        note_layout.addWidget(label(detail, "Muted"))
-        layout.addWidget(note)
-        row = QHBoxLayout()
-        row.addWidget(button("Cancel", dialog.reject))
-        row.addStretch()
-        row.addWidget(button("Continue", dialog.accept, True))
-        layout.addLayout(row)
-        return dialog.exec() == QDialog.DialogCode.Accepted
-
     def start_cold_signer(self):
         if sys.platform != "linux":
             self.statusBar().showMessage("Cold signer setup currently requires Linux.")
@@ -562,7 +587,17 @@ class App(QMainWindow):
             return
         if self.cold_process and self.cold_process.state() != QProcess.ProcessState.NotRunning:
             return
-        if not self._cold_network_notice():
+        self.cold_notice_previous = self.tabs.currentIndex()
+        self.tabs.setCurrentIndex(7)
+
+    def _begin_cold_signer(self):
+        if sys.platform != "linux":
+            self.statusBar().showMessage("Cold signer setup currently requires Linux.")
+            return
+        if self.busy:
+            self.statusBar().showMessage("Wait for the local Core connection check to finish, then continue to cold storage.")
+            return
+        if self.cold_process and self.cold_process.state() != QProcess.ProcessState.NotRunning:
             return
         suggested = shutil.which("bitcoind") or ""
         bitcoind, _ = QFileDialog.getOpenFileName(
@@ -838,12 +873,14 @@ class App(QMainWindow):
         if not self.busy:
             self.service = None
             self._clear()
+            self.setWindowTitle("Core Companion")
             self.connection.hide()
             self.statusBar().showMessage("Disconnected")
 
     def select_wallet(self, name):
         if not name or self.busy:
             return
+        self.setWindowTitle(f"Core Companion — {name}")
         self.address.clear()
         self.skip = 0
         self.transactions.setRowCount(0)

@@ -6,6 +6,8 @@ QMainWindow, QDialog { background: @page@; }
 QWidget { color: @text@; font-family: sans-serif; font-size: 13px; }
 QWidget#Page { background: @page@; }
 QWidget#OnboardingPage { background: @page@; }
+QWidget#OnlinePage { background: @page@; }
+QWidget#PageContent { background: transparent; }
 QMenuBar { background: @surface@; padding: 4px 14px; border-bottom: 1px solid @border@; }
 QMenuBar::item { padding: 6px 10px; }
 QMenuBar::item:selected, QMenu::item:selected { background: @accent-soft@; color: @accent-strong@; }
@@ -14,8 +16,8 @@ QMenu::item { padding: 7px 24px; }
 QWidget#Card, QFrame#Card { background: @surface@; border: 1px solid @border@; border-radius: 10px; }
 QLabel#Brand { color: @text@; font-size: 14px; font-weight: 650; }
 QLabel#Mark { background: @blue-soft@; color: @blue@; border: 1px solid @blue-border@; border-radius: 9px; font-size: 19px; font-weight: 700; }
-QLabel#Title { color: @text@; font-size: 22px; font-weight: 650; }
-QLabel#Heading { color: @text@; font-size: 16px; font-weight: 640; }
+QLabel#Title { color: @text@; font-size: 27px; font-weight: 620; }
+QLabel#Heading { color: @text@; font-size: 19px; font-weight: 600; }
 QLabel#Eyebrow { color: @muted@; font-size: 10px; font-weight: 650; letter-spacing: 1px; }
 QLabel#Muted { color: @muted@; }
 QLabel#Hash { color: @blue@; font-family: monospace; font-size: 13px; }
@@ -31,21 +33,28 @@ QPushButton#Primary { background: @accent@; border-color: @accent-strong@; color
 QPushButton#Primary:hover { background: @accent-strong@; }
 QDialog#ColdSigner QPushButton#Primary { background: @blue@; border-color: @blue@; color: white; }
 QDialog#ColdSigner QPushButton#Primary:hover { background: @blue@; border-color: @blue@; }
-QMainWindow#OnlineNode QPushButton#Primary { background: @red@; border-color: @red@; color: white; }
-QMainWindow#OnlineNode QPushButton#Primary:hover { background: @red@; }
+QWidget#OnlinePage QPushButton#Primary { background: @red@; border-color: @red@; color: white; }
+QWidget#OnlinePage QPushButton#Primary:hover { background: @red@; }
+QMainWindow#OnlineNode QPushButton#OnlineContinue { background: @red@; border-color: @red@; color: white; }
+QMainWindow#OnlineNode QPushButton#OnlineContinue:hover { background: @red@; }
 QMainWindow#OnlineNode QFrame#ActionPrimary { background: @red-soft@; border-color: @red-border@; }
 QMainWindow#OnlineNode QFrame#ActionPrimary:hover { border-color: @red@; }
 QMainWindow#OnlineNode QLabel#BlueIcon { background: @red-soft@; color: @red@; }
-QPushButton#ColdMode { border: 1px solid @blue-border@; background: @blue-soft@; color: @blue@; border-radius: 10px; font-size: 16px; font-weight: 650; }
-QPushButton#ColdMode:checked { border: 2px solid @blue@; }
-QPushButton#ColdMode:hover { border-color: @blue@; }
-QPushButton#OnlineMode { border: 1px solid @red-border@; background: @red-soft@; color: @red@; border-radius: 10px; font-size: 16px; font-weight: 650; }
-QPushButton#OnlineMode:checked { border: 2px solid @red@; }
-QPushButton#OnlineMode:hover { border-color: @red@; }
-QPushButton#SetupChoice { min-height: 150px; padding: 20px; border: 1px solid @border@; border-radius: 10px; background: @surface@; color: @text@; font-size: 16px; font-weight: 620; }
-QPushButton#SetupChoice:hover { border-color: @accent@; background: @surface-2@; }
-QPushButton#SetupChoice:checked { border: 2px solid @accent@; background: @accent-soft@; }
-QDialog#ColdSigner QPushButton#SetupChoice:checked { border-color: @blue@; background: @blue-soft@; color: @blue@; }
+QPushButton#ChoiceRow { min-height: 78px; border: 1px solid @border@; border-radius: 7px; background: @surface@; color: @text@; text-align: left; font-weight: 500; }
+QPushButton#ChoiceRow:hover { border-color: @accent@; background: @surface-2@; }
+QPushButton#ChoiceRow:checked[accent="green"] { border: 2px solid @accent@; background: @accent-soft@; }
+QPushButton#ChoiceRow:checked[accent="blue"] { border: 2px solid @blue@; background: @blue-soft@; }
+QPushButton#ChoiceRow:checked[accent="red"] { border: 2px solid @red@; background: @red-soft@; }
+QLabel#ChoiceIcon { background: @surface-2@; color: @accent-strong@; border-radius: 7px; font-size: 17px; font-weight: 650; }
+QPushButton#ChoiceRow[accent="blue"] QLabel#ChoiceIcon { background: @blue-soft@; color: @blue@; }
+QPushButton#ChoiceRow[accent="red"] QLabel#ChoiceIcon { background: @red-soft@; color: @red@; }
+QLabel#ChoiceTitle { color: @text@; font-size: 13px; font-weight: 620; }
+QLabel#ChoiceDescription { color: @muted@; font-size: 11px; font-weight: 400; }
+QLabel#ChoiceRadio { color: @muted@; font-size: 16px; }
+QFrame#ChoiceDivider { border: 0; border-top: 1px solid @border@; min-height: 1px; max-height: 1px; }
+QPushButton#ChoiceRow:checked[accent="green"] QLabel#ChoiceRadio { color: @accent-strong@; }
+QPushButton#ChoiceRow:checked[accent="blue"] QLabel#ChoiceRadio { color: @blue@; }
+QPushButton#ChoiceRow:checked[accent="red"] QLabel#ChoiceRadio { color: @red@; }
 QMainWindow#OnlineNode QPushButton#ColdContinue { background: @blue@; border-color: @blue@; color: white; }
 QMainWindow#OnlineNode QPushButton#ColdContinue:hover { background: @blue@; }
 QFrame#KPI { background: @surface@; border: 1px solid @border@; border-radius: 9px; }
@@ -55,7 +64,7 @@ QProgressBar::chunk { border-radius: 4px; background: @red@; }
 QPushButton#Quiet { border-color: transparent; background: transparent; color: @muted@; }
 QPushButton#Quiet:hover { color: @text@; background: @surface-2@; }
 QPushButton#Quiet[active="true"] { color: @blue@; background: @blue-soft@; }
-QFrame#ActionRow, QFrame#ActionPrimary { min-height: 58px; border: 1px solid @border@; border-radius: 9px; background: @surface@; }
+QFrame#ActionRow, QFrame#ActionPrimary { min-height: 74px; border: 1px solid @border@; border-radius: 9px; background: @surface@; }
 QFrame#ActionRow:hover { background: @surface-2@; border-color: @blue-border@; }
 QFrame#ActionPrimary { background: @blue-soft@; border-color: @blue-border@; }
 QFrame#ActionPrimary:hover { border-color: @blue@; }

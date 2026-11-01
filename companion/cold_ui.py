@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QPlainTextEdit,
     QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QToolTip,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QToolTip, QSizePolicy,
 )
 
 from .linux_cold import ColdSetupError
@@ -28,7 +28,7 @@ from .seed import (
     validate_phrase,
 )
 from .theme import stylesheet
-from .widgets import ActionRow
+from .widgets import ActionRow, ChoiceRow
 
 
 def _label(text, muted=False):
@@ -144,12 +144,39 @@ class ColdSignerDialog(QDialog):
         self._open_core(bitcoind)
 
     def _card(self):
+        page = QWidget()
+        page.setObjectName("Page")
+        shell = QHBoxLayout(page)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.addStretch(1)
         card = QWidget()
         card.setObjectName("Card")
+        card.setMaximumWidth(840)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        shell.addWidget(card, 1)
+        shell.addStretch(1)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(12)
-        self.stack.addWidget(card)
+        self.stack.addWidget(page)
+        return layout
+
+    def _page(self, width=820):
+        page = QWidget()
+        page.setObjectName("Page")
+        shell = QHBoxLayout(page)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.addStretch(1)
+        content = QWidget()
+        content.setObjectName("PageContent")
+        content.setMaximumWidth(width)
+        content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        shell.addWidget(content, 1)
+        shell.addStretch(1)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 16, 0, 16)
+        layout.setSpacing(14)
+        self.stack.addWidget(page)
         return layout
 
     def _build_start_page(self):
@@ -354,7 +381,7 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_complete_page(self):
-        layout = self._card()
+        layout = self._page(820)
         identity = QFrame()
         identity.setObjectName("IdentityPanel")
         identity_row = QHBoxLayout(identity)
@@ -395,11 +422,20 @@ class ColdSignerDialog(QDialog):
         layout.addWidget(heading)
         actions = QVBoxLayout()
         actions.setSpacing(9)
-        scan = ActionRow("▦", "Scan QR", "Verify a receive address or review a transaction to sign.", primary=True)
+        scan = ActionRow(
+            "▦", "Scan QR", "", primary=True,
+            tooltip="Verify a receive address or review a PSBT before signing.",
+        )
         scan.clicked.connect(lambda: self.stack.setCurrentIndex(9))
-        addresses = ActionRow("▣", "View wallet addresses", "Browse saved addresses and labels.")
+        addresses = ActionRow(
+            "▣", "View wallet addresses", "",
+            tooltip="See saved addresses and labels generated or confirmed by this signer.",
+        )
         addresses.clicked.connect(self._open_addresses)
-        tools = ActionRow("⚙", "Tools & Settings", "Export a watch-only wallet, view policy, and manage settings.")
+        tools = ActionRow(
+            "⚙", "Tools & Settings", "",
+            tooltip="Export the watch-only wallet, view the policy, or change settings.",
+        )
         tools.clicked.connect(lambda: self.stack.setCurrentIndex(12))
         actions.addWidget(scan)
         actions.addWidget(addresses)
@@ -500,11 +536,14 @@ class ColdSignerDialog(QDialog):
         self._add_back_heading(layout, "Tools & Settings", "Wallet policy, exports, and preferences.", 6)
         actions = QVBoxLayout()
         actions.setSpacing(9)
-        policy = ActionRow("⌘", "Wallet policy", "Review the wallet identity, signer keys, and public descriptors.")
+        policy = ActionRow("⌘", "Wallet policy", "", tooltip="Review the wallet identity, signer keys, and public descriptors.")
         policy.clicked.connect(lambda: self.stack.setCurrentIndex(13))
-        export = ActionRow("⇧", "Export watch-only wallet", "Export public wallet data for use on the online node.")
+        export = ActionRow(
+            "⇧", "Export watch-only wallet", "",
+            tooltip="Export public wallet data for use on the online node.", icon_key="export",
+        )
         export.clicked.connect(self._export_watchonly_wallet)
-        settings = ActionRow("⚙", "Settings", "Change appearance and view cold-signer session details.")
+        settings = ActionRow("⚙", "Settings", "", tooltip="Change appearance and view cold-signer session details.")
         settings.clicked.connect(lambda: self.stack.setCurrentIndex(14))
         for action in (policy, export, settings):
             actions.addWidget(action)
@@ -542,24 +581,19 @@ class ColdSignerDialog(QDialog):
         layout.addStretch()
 
     def _build_setup_page(self):
-        layout = self._card()
+        layout = self._page(780)
         heading = _label("Wallet setup", False)
         heading.setObjectName("Title")
         layout.addWidget(heading)
-        choices = QHBoxLayout()
-        choices.setSpacing(14)
-        self.create_choice = QPushButton("＋\n\nCreate a new wallet")
-        self.create_choice.setObjectName("SetupChoice")
-        self.create_choice.setCheckable(True)
-        self.create_choice.setMinimumHeight(170)
+        choices = QVBoxLayout()
+        choices.setSpacing(0)
+        self.create_choice = ChoiceRow("＋", "Create a new wallet", accent="blue")
         self.create_choice.clicked.connect(lambda: self._choose_setup("new"))
-        self.recover_choice = QPushButton("↻\n\nUse an existing wallet")
-        self.recover_choice.setObjectName("SetupChoice")
-        self.recover_choice.setCheckable(True)
-        self.recover_choice.setMinimumHeight(170)
+        self.recover_choice = ChoiceRow("↻", "Use an existing wallet", accent="blue")
         self.recover_choice.clicked.connect(lambda: self._choose_setup("recover"))
-        choices.addWidget(self.create_choice, 1)
-        choices.addWidget(self.recover_choice, 1)
+        choices.addWidget(self.create_choice)
+        choices.addLayout(self._or_separator())
+        choices.addWidget(self.recover_choice)
         layout.addLayout(choices)
         layout.addStretch()
         footer = QHBoxLayout()
@@ -576,24 +610,23 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_type_page(self):
-        layout = self._card()
+        layout = self._page(780)
         heading = _label("Choose wallet type", False)
         heading.setObjectName("Title")
         layout.addWidget(heading)
-        choices = QHBoxLayout()
-        choices.setSpacing(14)
-        self.single_choice = QPushButton("◉\n\nSingle-signature")
-        self.single_choice.setObjectName("SetupChoice")
-        self.single_choice.setCheckable(True)
-        self.single_choice.setMinimumHeight(170)
+        choices = QVBoxLayout()
+        choices.setSpacing(0)
+        self.single_choice = ChoiceRow(
+            "◉", "Single-signature", "One key creates and signs for this wallet.", accent="blue"
+        )
         self.single_choice.clicked.connect(lambda: self._choose_type("single"))
-        self.multi_choice = QPushButton("⌘\n\nMultisig\nBIP87")
-        self.multi_choice.setObjectName("SetupChoice")
-        self.multi_choice.setCheckable(True)
-        self.multi_choice.setMinimumHeight(170)
+        self.multi_choice = ChoiceRow(
+            "⌘", "Multisig · BIP87", "Several signers share the wallet; choose the required threshold.", accent="blue"
+        )
         self.multi_choice.clicked.connect(lambda: self._choose_type("multisig"))
-        choices.addWidget(self.single_choice, 1)
-        choices.addWidget(self.multi_choice, 1)
+        choices.addWidget(self.single_choice)
+        choices.addLayout(self._or_separator())
+        choices.addWidget(self.multi_choice)
         layout.addLayout(choices)
         layout.addStretch()
         footer = QHBoxLayout()
@@ -608,6 +641,22 @@ class ColdSignerDialog(QDialog):
         self.type_continue.clicked.connect(self._continue_type_choice)
         footer.addWidget(self.type_continue)
         layout.addLayout(footer)
+
+    @staticmethod
+    def _or_separator():
+        divider = QHBoxLayout()
+        divider.setContentsMargins(0, 5, 0, 5)
+        divider.addStretch(1)
+        left_rule = QFrame()
+        left_rule.setFrameShape(QFrame.Shape.HLine)
+        left_rule.setObjectName("ChoiceDivider")
+        right_rule = QFrame()
+        right_rule.setFrameShape(QFrame.Shape.HLine)
+        right_rule.setObjectName("ChoiceDivider")
+        divider.addWidget(left_rule, 1)
+        divider.addWidget(_label("OR", True))
+        divider.addWidget(right_rule, 1)
+        return divider
 
     def _build_protection_page(self):
         layout = self._card()
@@ -1180,6 +1229,7 @@ class ColdSignerDialog(QDialog):
             field.clear()
         self.descriptors.setPlainText("\n".join(result["descriptors"]))
         self.wallet_display_name = self.wallet_name_input.text().strip() or "Cold signer"
+        self.setWindowTitle(f"Core Companion — {self.wallet_display_name}")
         self.wallet_fingerprint = str(result.get("address_info", {}).get("hdmasterfingerprint", "")).upper()
         own_key = result.get("own_account_key", "")
         if not self.wallet_fingerprint and own_key.startswith("[") and "/" in own_key:
