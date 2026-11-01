@@ -28,8 +28,7 @@ from .linux_cold import ColdSetupError, ColdSystemSession
 from .theme import stylesheet
 from .widgets import ActionRow, ChoiceRow, IconButton, LineIcon
 
-MANAGED_RPC_PORT = 18443
-MANAGED_P2P_PORT = 18444
+MANAGED_RPC_PORT = 8332
 PRUNE_TARGET_MIB = 10000
 
 def label(text, name=None):
@@ -115,6 +114,7 @@ class App(QMainWindow):
         self.core_download_closing = False
         self.core_download_cancelled = False
         self.core_cookie_path = None
+        self.connection_fallback = False
         self.managed_core_process = None
         self.node_start_timer = QTimer(self)
         self.node_start_timer.setInterval(1200)
@@ -749,12 +749,12 @@ class App(QMainWindow):
         self.core_cookie_path = Path(cookie_path)
         self.port.setText(str(port))
 
-    def _start_managed_node(self, binary=None):
+    def _start_managed_node(self, binary=None, *, prefer_existing=True):
         if sys.platform != "linux":
             self.statusBar().showMessage("Starting a downloaded Core node is available on Linux.")
             return
         default_cookie = default_cookie_path()
-        if default_cookie.is_file():
+        if prefer_existing and default_cookie.is_file():
             self._use_core_connection(default_cookie, 8332)
             self.connect()
             return
@@ -782,10 +782,6 @@ class App(QMainWindow):
                 "-daemon=0",
                 "-server=1",
                 f"-prune={PRUNE_TARGET_MIB}",
-                f"-rpcport={MANAGED_RPC_PORT}",
-                f"-port={MANAGED_P2P_PORT}",
-                "-rpcallowip=127.0.0.1",
-                "-rpcbind=127.0.0.1",
             ]
             with (data_dir / "companion-startup.log").open("ab", buffering=0) as log_file:
                 self.managed_core_process = subprocess.Popen(
@@ -1056,6 +1052,16 @@ class App(QMainWindow):
         self.busy = False
         self.wallet_picker.setEnabled(True)
         if error:
+            if self.connection_fallback:
+                self.connection_fallback = False
+                self.core_cookie_path = None
+                self.statusBar().showMessage("Starting the verified Bitcoin Core node…")
+                QTimer.singleShot(0, lambda: self._start_managed_node(prefer_existing=False))
+                return
+            if self.node_start_timer.isActive():
+                self._set_core_status("Starting Bitcoin Core…")
+                self.statusBar().showMessage("Waiting for Core's local connection…")
+                return
             if hasattr(self, "core_status"):
                 self._set_core_status("Could not connect. Check that Core is running.", "error")
             self.statusBar().showMessage(error)
@@ -1115,10 +1121,16 @@ class App(QMainWindow):
         try:
             cookie_path = self.core_cookie_path or default_cookie_path()
             if not cookie_path.is_file() and sys.platform == "linux" and self._installed_core_binary():
-                self._start_managed_node()
+                self._start_managed_node(prefer_existing=False)
                 return
+            self.connection_fallback = (
+                sys.platform == "linux"
+                and cookie_path == default_cookie_path()
+                and self._installed_core_binary() is not None
+            )
             service = WalletService(CoreRPC(self.port.text(), cookie_path))
         except CoreError as exc:
+            self.connection_fallback = False
             self._set_core_status("Could not connect. Check Core or review advanced settings.", "error")
             self.statusBar().showMessage(str(exc))
             return
@@ -1154,6 +1166,7 @@ class App(QMainWindow):
         )
 
     def connected(self, service, data):
+        self.connection_fallback = False
         self.node_start_timer.stop()
         if data["chain"].get("chain") != "main":
             self.service = None

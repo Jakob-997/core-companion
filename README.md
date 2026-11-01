@@ -40,7 +40,7 @@ Choose **Online Node** to start the verified Core automatically. Companion uses
 its own node folder, a local cookie, loopback RPC and a 10,000 MiB pruning
 target; blockchain sync starts immediately and continues after Companion closes.
 If a cookie is present in Core's standard data directory, Companion tries that
-node first.
+node first and starts its verified node automatically if the connection fails.
 Downloading Core alone does not start networking, so it is safe to download it
 before setting up a cold signer. The verified binary is also available to the
 cold signer.

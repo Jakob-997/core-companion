@@ -84,8 +84,8 @@ The node enables RPC only on loopback, uses its cookie from that data directory,
 and starts with `-prune=10000`. It runs independently after the UI closes and
 reconnects on the next app launch. Downloading Core does not start the node;
 cold-signer setup therefore does not silently bring up online networking. If a
-Core cookie exists in the standard user data directory, Companion connects to
-that running Core instead.
+Core cookie exists in the standard user data directory, Companion tries that
+node first and starts its managed node if the connection is stale or fails.
 
 ## Seed and key flow
 
