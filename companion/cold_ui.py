@@ -2,7 +2,6 @@
 
 import base64
 import json
-import hashlib
 import secrets
 import unicodedata
 from decimal import Decimal
@@ -26,6 +25,7 @@ from .offline_core import OfflineCore
 from .seed import (
     SeedError,
     entropy_from_sources,
+    entropy_material,
     entropy_commitment,
     final_word_candidates,
     phrase_from_entropy,
@@ -1088,29 +1088,25 @@ class ColdSignerDialog(QDialog):
             self.entropy_audit.setPlainText(str(exc))
             return
         size = count * 4 // 3
-        command = (
-            "python3 - <<'PY'\n"
-            "from hashlib import sha256\n"
-            "from mnemonic import Mnemonic  # python-mnemonic==0.21\n"
-            f"wallet_hash = bytes.fromhex('{self.wallet_digest.hex()}')\n"
-            f"os_random = bytes.fromhex('{self.os_entropy.hex()}')\n"
-            f"dice = b'{dice}'\n"
-            "material = (b'Core Companion BIP39 entropy v1\\x00'\n"
-            "    + len(wallet_hash).to_bytes(2, 'big') + wallet_hash\n"
-            "    + len(os_random).to_bytes(2, 'big') + os_random\n"
-            "    + len(dice).to_bytes(4, 'big') + dice)\n"
-            "digest = sha256(material).digest()\n"
-            "print('Combined SHA-256:', digest.hex())\n"
-            f"print('BIP39 entropy:', digest[:{size}].hex())\n"
-            f"print(Mnemonic('english').to_mnemonic(digest[:{size}]))\nPY"
+        material = entropy_material(self.wallet_digest, self.os_entropy, dice)
+        hash_command = (
+            'python3 -c "from hashlib import sha256; '
+            f"print(sha256(bytes.fromhex('{material.hex()}')).hexdigest())" + '"'
+        )
+        phrase_command = (
+            'python3 -c "from mnemonic import Mnemonic; '
+            f"print(Mnemonic('english').to_mnemonic(bytes.fromhex('{digest[:size].hex()}')))" + '"'
         )
         self.entropy_audit.setPlainText(
-            f"Dice digits: {dice or '(none)'}\n"
-            f"Dice SHA-256: {hashlib.sha256(dice.encode('ascii')).hexdigest()}\n"
-            "The mixture uses the dice digits directly, not their displayed hash.\n"
-            f"Combined SHA-256: {digest.hex()}\n"
+            f"Computer RNG (32 OS-random bytes, hex): {self.os_entropy.hex()}\n"
+            f"Wallet.dat SHA-256: {self.wallet_digest.hex()}\n"
+            f"Dice rolls: {dice or '(none)'}\n\n"
+            "Actual SHA-256 command (uses those exact inputs, no new randomness):\n"
+            + hash_command + "\n\n"
+            f"SHA-256 result: {digest.hex()}\n"
             f"BIP39 entropy ({size * 8} bits / {count} words): {digest[:size].hex()}\n\n"
-            "Reproduce exactly (SECRET inputs; no additional randomness):\n" + command
+            "Convert that entropy to the same words (requires mnemonic==0.21):\n"
+            + phrase_command
         )
 
     def _generate_phrase(self):

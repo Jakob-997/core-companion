@@ -58,8 +58,9 @@ The cold signer defaults to 12 words and requires retyping every word. Its
 entropy screen keeps hashes, the secret live calculation and the exact Python
 reproduction command inside **Audit details**, collapsed by default. These values can recreate the recovery phrase; use only
 a trusted offline computer for verification. The command requires the pinned
-`mnemonic==0.21` package. The dice hash is shown for auditing; the entropy recipe
-uses the normalized dice digits directly.
+`mnemonic==0.21` package. Details show actual OS-random bytes, the wallet-file
+hash and live dice digits, one exact SHA-256 command and the resulting BIP39
+entropy. A second short command converts that entropy into the same words.
 
 Its
 watch-only export displays a QR containing the wallet name and public receive

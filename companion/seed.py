@@ -55,28 +55,27 @@ def entropy_from_sources(wallet_digest, word_count=24, dice_rolls="", os_entropy
     """
     if word_count not in WORD_COUNTS:
         raise SeedError("BIP39 word count must be 12, 15, 18, 21, or 24.")
-    if not isinstance(wallet_digest, bytes) or len(wallet_digest) != 32:
-        raise SeedError("The temporary wallet fingerprint must be a SHA-256 digest.")
+    os_entropy = secrets.token_bytes(32) if os_entropy is None else os_entropy
+    digest = hashlib.sha256(entropy_material(wallet_digest, os_entropy, dice_rolls)).digest()
+    return digest[:WORD_COUNTS[word_count]]
 
+
+def entropy_material(wallet_digest, os_entropy, dice_rolls=""):
+    """The exact bytes hashed for generation and displayed for reproduction."""
+    if any(not isinstance(value, bytes) or len(value) != 32 for value in (wallet_digest, os_entropy)):
+        raise SeedError("Wallet hash and OS randomness must each be 32 bytes.")
     dice = "".join(str(dice_rolls).split())
     if any(face not in "123456" for face in dice):
         raise SeedError("Dice input may contain only rolls from 1 to 6.")
     if len(dice) > 4096:
         raise SeedError("Dice input is too long.")
-
-    os_entropy = secrets.token_bytes(32) if os_entropy is None else os_entropy
-    if not isinstance(os_entropy, bytes) or len(os_entropy) != 32:
-        raise SeedError("The OS randomness contribution must be 32 bytes.")
-
     dice_bytes = dice.encode("ascii")
-    material = (
+    return (
         _DOMAIN
         + len(wallet_digest).to_bytes(2, "big") + wallet_digest
         + len(os_entropy).to_bytes(2, "big") + os_entropy
         + len(dice_bytes).to_bytes(4, "big") + dice_bytes
     )
-    digest = hashlib.sha256(material).digest()
-    return digest[:WORD_COUNTS[word_count]]
 
 
 def entropy_commitment(wallet_digest, os_entropy):
