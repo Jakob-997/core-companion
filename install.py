@@ -23,11 +23,11 @@ def main():
     if environment.is_symlink():
         parser.error("The .venv path is a symbolic link. Use a fresh application folder.")
     try:
-        if Path(sys.prefix).resolve() != environment.resolve():
+        if not environment.exists():
             venv.EnvBuilder(with_pip=True).create(environment)
         python = str(environment / "bin" / "python")
-        if not Path(python).is_file():
-            raise OSError("The application Python environment was not created.")
+        if not (environment / "pyvenv.cfg").is_file() or not Path(python).is_file():
+            raise OSError("The existing .venv is incomplete. Move it aside, then run the installer again.")
         subprocess.run([
             python, "-E", "-s", "-m", "pip", "--isolated", "install",
             "--require-hashes", "--only-binary=:all:", "--no-deps", "--force-reinstall",

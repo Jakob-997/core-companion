@@ -23,8 +23,7 @@ The installer checks the pinned dependency wheel hashes and adds **Core
 Companion** to the applications menu. Keep the application folder in place.
 The private Python environment is managed inside it; no activation is needed.
 Run the installer again after updating source or replacing a release folder.
-It safely reuses that environment when you launch the installer from its
-already-active `.venv`.
+It keeps an existing valid `.venv` and updates its pinned packages in place.
 `python3 install.py --no-desktop` installs without changing the applications menu.
 
 Linux x86-64 requires glibc 2.34+ (Debian 12+). ARM64 dependency wheels require
