@@ -10,3 +10,6 @@ preview*.png
 *.dat
 *.sqlite
 *.log
+*.psbt
+wallet-backup*.json
+.ruff_cache/

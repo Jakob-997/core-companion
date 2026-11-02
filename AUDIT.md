@@ -71,7 +71,7 @@ keys redacted.
 UI checks also cover fixed pre-dice input commitments, recovery without a
 second phrase-entry screen, one BIP39-passphrase entry on recovery, cleared
 password fields and hidden online wallet actions until a wallet is loaded.
-These follow-up checks do not establish end-to-end signing, camera access or
+These wallet-setup checks did not establish end-to-end signing, camera access or
 host network/swap restoration.
 
 The wallet digest and OS bytes are fixed before dice entry and reused on
@@ -88,6 +88,64 @@ treated as a recovery backup and checked only on a trusted offline computer.
 The panel is cleared after wallet creation, when switching setup choices and
 on shutdown; Python/Qt memory erasure is not guaranteed.
 
+## Release-candidate pass
+
+- Fixed the multisig exchange dead end: prepare the local signer, share its
+  public BIP87 key, then collect cosigner keys and finish the policy. Clear the
+  phrase and initial password fields after preparation; encrypted completion
+  asks for the wallet-file password again without re-deriving the seed.
+- Added a closing/backup prompt and public JSON policy export, including when
+  the payload exceeds a single QR. Cold labels and address indexes remain
+  temporary; the interface and documentation now state that clearly.
+- Resolve privileged tools through fixed system directories. Recheck host
+  isolation periodically and before sensitive operations. Preserve restoration
+  state after failure and refuse a new session until cleanup succeeds.
+- Make Core installation rollback work for cancellation and keyboard interrupts,
+  and sanitize the verifier subprocess tool path. Fault-injection checks cover
+  interruptions before and after each replacement rename and during extraction.
+- Support Core 32.1's default PSBTv2 decoding through a separate review ID over
+  Core-decoded transaction fields. No Bitcoin transaction serializer was added.
+  V0 continues to use Core's unsigned txid.
+- Refresh online balances/history as well as blockchain progress, clear old
+  receiving QRs when changing wallets, and keep wallet-operation failures from
+  incorrectly changing the connection indicator. Wallet names share validation
+  between cold setup and public import.
+- Scroll long signing/export screens, improve dark-mode primary-button contrast,
+  use system fixed-width fonts and replace placeholder hover help with actual
+  explanations, including dynamically added controls.
+- Add a normal Linux desktop launcher/installer, a complete dependency wheel
+  hash lock, Qt 6.11.3, version metadata and deterministic source packaging.
+  The packaged application rejects the source-only networking testing flag.
+
+Actual verified Core 32.1 validation under Ubuntu/WSL now includes encrypted
+2-of-3 BIP87 preparation/sharing/completion, duplicate signer rejection,
+retrying wrong passwords, public exports, fresh addresses, and actual partial
+signature creation for PSBTv0 and PSBTv2. Checks reject changed payloads, replayed
+approvals, unsafe signature modes, changes after signing, malformed v2 fields,
+fractional-satoshi outputs, and changed isolation state; encrypted wallets are
+relocked. Synthetic public-fixture UTXOs were used, with no funds or broadcasting.
+Host swap inspection was simulated for these fixtures; actual peer-network
+flags were checked. The earlier single-signature address-type checks also pass.
+
+The actual exported multisig policy was imported through `WalletService` into
+a Core wallet with private keys disabled. Its first receiving address matched
+the cold signer's first address exactly; public descriptors, labels and wallet
+snapshots were also checked. Linux Qt 6.11.3 screens were exercised and visually
+inspected at 980×680 and 1280×850 in both themes, including staged multisig,
+PSBTv0/v2 review/sign UI integration, backups, help and signed-QR scrolling.
+
+The release source tar was byte-identical when built with Windows Python and
+Linux Python. Its file-hash manifest passed, the packaged CLI rejected the
+development flag, and a fresh installation of the extracted package on Linux
+checked dependency hashes, imported the libraries, created a valid desktop
+entry and opened/exited the app. Actual desktop-entry launches using inert
+fixtures covered spaces, quotes, dollar signs, backticks and backslashes in
+paths. Unsupported percent/control-character desktop paths are rejected early.
+
+Temporary scripts remain outside the repository as requested. These are
+engineering checks, not an independent audit. Camera capture, actual Debian
+privilege prompts and network/swap changes/restoration still need VM acceptance.
+
 ## Remaining limits
 
 - Python cannot guarantee erasure of seed strings. The separate signer process
@@ -103,10 +161,11 @@ on shutdown; Python/Qt memory erasure is not guaranteed.
   import still running in Core; do not assume a failed UI response rolled it back.
 - QR transfer supports one static QR. Large multisig descriptors and PSBTs may
   require text or file transfer; animated QR protocols are not implemented.
-- Dependency versions are pinned, but reproducible installers, dependency hash
-  locking, signed app releases and a separate release-time security review
-  remain packaging work. The development networking bypass is still present
-  and must be removed or excluded from release builds.
+- Dependency wheel hashes and reproducible source packaging are implemented.
+  Signed app releases, full Debian acceptance, a redistribution license and
+  independent review remain release gates. The source networking bypass is
+  disabled by the release builder; binary/installer reproducibility beyond
+  the source archive and locked wheels is not claimed.
 
 ## Primary references
 

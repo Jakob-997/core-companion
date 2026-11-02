@@ -9,13 +9,18 @@ def btc(value):
     return f"{Decimal(str(value)):.8f}"
 
 
+def validate_wallet_name(name):
+    if not isinstance(name, str) or not re.fullmatch(r"[\w -]{1,80}", name) or not name.strip():
+        raise CoreError("Use a wallet name with letters, numbers, spaces, hyphens or underscores (up to 80 characters).")
+    return name
+
+
 class WalletService:
     def __init__(self, rpc):
         self.rpc = rpc
 
     def import_public_wallet(self, name, descriptors):
-        if not isinstance(name, str) or not re.fullmatch(r"[\w -]{1,80}", name):
-            raise CoreError("Use a wallet name with letters, numbers, spaces, hyphens or underscores.")
+        validate_wallet_name(name)
         if not isinstance(descriptors, list) or not 1 <= len(descriptors) <= 2:
             raise CoreError("Import one receive descriptor, or receive and change descriptors in that order.")
         requests = []

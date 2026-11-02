@@ -1,7 +1,7 @@
 """Bounded, single-QR transport through the system zbarcam decoder."""
 
-import shutil
 from PySide6.QtCore import QProcess, Signal
+from .linux_cold import _system_tool
 
 
 class QRScanner(QProcess):
@@ -20,7 +20,7 @@ class QRScanner(QProcess):
     def scan(self):
         if self.state() != QProcess.ProcessState.NotRunning:
             return
-        executable = shutil.which("zbarcam")
+        executable = _system_tool("zbarcam")
         if not executable:
             self.failed.emit("Install zbar-tools to scan with a camera, or paste the QR contents.")
             return

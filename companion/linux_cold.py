@@ -8,12 +8,20 @@ import sys
 from pathlib import Path
 
 
+SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 class ColdSetupError(RuntimeError):
     pass
 
 
+def _system_tool(name):
+    """Resolve host tools without searching user-controlled PATH entries."""
+    return shutil.which(name, path=SYSTEM_PATH)
+
+
 def _session_environment():
-    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}
+    env = {"PATH": SYSTEM_PATH, "LANG": "C", "LC_ALL": "C"}
     for key in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"):
         if os.environ.get(key):
             env[key] = os.environ[key]
@@ -69,8 +77,8 @@ def _active_swaps():
 class _PrivilegedCommand:
     @staticmethod
     def run(tool, *args, timeout=90):
-        pkexec = shutil.which("pkexec")
-        executable = shutil.which(tool)
+        pkexec = _system_tool("pkexec")
+        executable = _system_tool(tool)
         if not pkexec or not executable:
             raise ColdSetupError("This Linux system needs pkexec and the standard system networking tools.")
         try:
@@ -170,7 +178,7 @@ class NetworkSession:
 
     @staticmethod
     def _nm_enabled():
-        busctl = shutil.which("busctl")
+        busctl = _system_tool("busctl")
         if not busctl:
             raise ColdSetupError("Cannot verify NetworkManager state; install systemd's busctl tool.")
         result = NetworkSession._run_capture([
@@ -184,7 +192,7 @@ class NetworkSession:
 
     @staticmethod
     def _interfaces():
-        ip = shutil.which("ip")
+        ip = _system_tool("ip")
         if not ip:
             raise ColdSetupError("Cold signer mode requires iproute2 so it can verify network links are down.")
         result = NetworkSession._run_capture([ip, "-json", "link", "show"])
@@ -210,7 +218,7 @@ class NetworkSession:
 
     @staticmethod
     def _set_manager(enabled):
-        nmcli = shutil.which("nmcli")
+        nmcli = _system_tool("nmcli")
         if not nmcli:
             raise ColdSetupError("NetworkManager's nmcli tool is unavailable.")
         result = NetworkSession._run_capture([nmcli, "networking", "on" if enabled else "off"], timeout=30)
@@ -222,7 +230,7 @@ class NetworkSession:
         _PrivilegedCommand.run("ip", "link", "set", "dev", name, "up" if enabled else "down")
 
     def assert_disabled(self):
-        if self.network_manager_available or shutil.which("nmcli"):
+        if self.network_manager_available or _system_tool("nmcli"):
             if self._nm_enabled():
                 raise ColdSetupError("NetworkManager is still enabled; cold Core will not be started.")
         if any(up for _, up in self._interfaces()):
@@ -232,7 +240,7 @@ class NetworkSession:
         if sys.platform != "linux":
             raise ColdSetupError("Cold signer setup currently requires Linux.")
         self.interfaces = self._interfaces()
-        self.network_manager_available = bool(shutil.which("nmcli"))
+        self.network_manager_available = bool(_system_tool("nmcli"))
         if self.network_manager_available:
             self.was_enabled = self._nm_enabled()
         self.changed = True
@@ -292,6 +300,13 @@ class ColdSystemSession:
                 except ColdSetupError:
                     pass
             raise
+
+    def assert_disabled(self):
+        """Fail if host isolation was changed after the cold session began."""
+        if _active_swaps():
+            raise ColdSetupError("System swap is active. Close the signer before continuing.")
+        if self.disable_networking:
+            self.network.assert_disabled()
 
     def restore(self):
         errors = []

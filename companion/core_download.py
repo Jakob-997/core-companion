@@ -13,6 +13,11 @@ import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
 
+if __package__:
+    from .linux_cold import SYSTEM_PATH, _system_tool
+else:
+    from linux_cold import SYSTEM_PATH, _system_tool
+
 
 DOWNLOAD_PAGE = "https://bitcoincore.org/en/download/"
 VERIFIER = Path(__file__).parent / "vendor" / "bitcoin-core" / "verify.py"
@@ -42,8 +47,11 @@ class CoreDownloadError(Exception):
 
 def _run_gpg(args, environment, input_text=None):
     global active_verifier
+    gpg = _system_tool("gpg")
+    if not gpg:
+        raise CoreDownloadError("Install GPG, then try again.")
     active_verifier = subprocess.Popen(
-        ["gpg", "--batch", *args],
+        [gpg, "--batch", *args],
         env=environment,
         stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -56,6 +64,9 @@ def _run_gpg(args, environment, input_text=None):
     except subprocess.TimeoutExpired as exc:
         _terminate_active_process()
         raise CoreDownloadError("Timed out while retrieving Core signing keys.") from exc
+    except BaseException:
+        _terminate_active_process()
+        raise
     code = active_verifier.returncode
     active_verifier = None
     return code, output, error
@@ -64,6 +75,7 @@ def _run_gpg(args, environment, input_text=None):
 def _prepare_signing_keyring(home):
     home.mkdir(mode=0o700)
     environment = os.environ.copy()
+    environment["PATH"] = SYSTEM_PATH
     environment["GNUPGHOME"] = str(home)
     trusted = []
     for fingerprint in TRUSTED_RELEASE_SIGNERS:
@@ -212,24 +224,28 @@ def _extract_verified_archive(archive, version, install_root):
                 raise CoreDownloadError("The Core install path exists and is not a folder.")
             backup = Path(tempfile.mkdtemp(prefix=f".{version}-old-", dir=install_root))
             backup.rmdir()
-            os.rename(destination, backup)
         try:
-            os.rename(staging, destination)
-        except Exception:
             if backup is not None:
+                os.rename(destination, backup)
+            os.rename(staging, destination)
+        except BaseException:
+            # Signals raise SystemExit/KeyboardInterrupt too. Restore the old
+            # install even if interruption arrives just after either rename.
+            if backup is not None and backup.exists():
+                if destination.exists():
+                    shutil.rmtree(destination)
                 os.rename(backup, destination)
             raise
         if backup is not None:
             shutil.rmtree(backup, ignore_errors=True)
         return destination / "bin" / "bitcoind"
-    except Exception:
+    finally:
         shutil.rmtree(staging, ignore_errors=True)
-        raise
 
 
 def download_and_verify():
     global active_verifier
-    if not shutil.which("gpg") or not shutil.which("wget"):
+    if not _system_tool("gpg") or not _system_tool("wget"):
         raise CoreDownloadError("Install GPG and wget, then try again.")
     if not VERIFIER.is_file():
         raise CoreDownloadError("Bitcoin Core's official verification script is missing.")
@@ -308,14 +324,17 @@ def download_and_verify():
             "archive_sha256": verified[expected_archive],
         }
     finally:
-        active_verifier = None
+        _terminate_active_process()
         try:
-            subprocess.run(
-                ["gpgconf", "--homedir", str(gpg_home), "--kill", "all"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
+            gpgconf = _system_tool("gpgconf")
+            if gpgconf:
+                subprocess.run(
+                    [gpgconf, "--homedir", str(gpg_home), "--kill", "all"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    env={**os.environ, "PATH": SYSTEM_PATH},
+                )
         except (OSError, subprocess.TimeoutExpired):
             pass
         for signum, handler in old_handlers.items():

@@ -19,6 +19,8 @@ call that RPC instead of adding parallel wallet logic.
 ## Source map
 
 - `run.py`: cold-helper process isolation and early core-dump restrictions.
+- `install.py`, `core-companion`: hash-locked dependency installation and the
+  Linux desktop launcher. `tools/build_release.py` builds the source archive.
 - `linux_cold.py`: host network and swap state changes and restoration.
 - `offline_core.py`: isolated Core lifecycle, BIP87 descriptors, address checks,
   watch-only export, and PSBT review/signing.
@@ -48,13 +50,21 @@ a separate process tree: it starts a second, isolated Bitcoin Core process with
 its own data directory, wallet directory, cookie and log under `/dev/shm`. Its
 P2P networking is disabled by Core options and `setnetworkactive false`; the
 controller also disables non-loopback host links and swap before starting it.
-The development-only `--dev-keep-network` flag skips host-link changes while
+The source-development `--dev-keep-network` flag skips host-link changes while
 retaining Core's P2P shutdown and swap handling. Other programs can still use
-the network in that mode. Do not include this bypass in release builds or use
-it with wallets holding funds.
+the network in that mode. The release builder disables this command-line flag;
+do not use development mode with wallets holding funds.
 The UI helper starts in its own process group, disables core dumps and Linux
 dumpability, then stops Core and removes its session directory before the
 controller restores the prior host settings.
+
+Host network/swap state is checked every two seconds by the controller. A failed
+check stops the signer process group and invokes cleanup before restoring
+settings. Core peer networking and host state are also checked before key
+creation, derivation, PSBT review/signing and new address generation. Tools
+requiring administrator authorization are resolved only in fixed system
+directories. These checks detect changes; they are not a network namespace or
+protection against privileged processes and cannot eliminate every race.
 
 The helper passes private key data only over authenticated loopback RPC. The
 companion hashes the closed temporary wallet file as bytes; it does not parse
@@ -113,8 +123,10 @@ bounded, and a stale managed cookie no longer causes an endless reconnect loop.
    `python-mnemonic`. `to_seed()` applies the optional BIP39 passphrase;
    `to_hd_master_key()` produces the BIP32 root xprv. Bitcoin Core imports that
    root with `addhdkey` and owns all child-key and descriptor derivation.
-5. For multisig, Core derives each local signer account at
-   `m/87h/0h/0h`. The app builds receive and change `wsh(sortedmulti(...))`
+5. For multisig, Core derives the local signer account at
+   `m/87h/0h/0h` first. The UI shares its public account key before asking for
+   other signers, and clears the phrase/passphrase fields. Once the other keys
+   are collected, the app builds receive and change `wsh(sortedmulti(...))`
    descriptors with full key origins, asks Core to checksum and import them,
    then checks that Core recognizes the first receive address as its own.
 6. On close, stop Core, remove its tmpfs session directory, and restore the
@@ -123,7 +135,8 @@ bounded, and a stale managed cookie no longer causes an endless reconnect loop.
    not make this a reviewed or production-secure signer.
 
 Before closing, the user can export the public receive/change descriptors and
-wallet name as a QR. Core supplies the public descriptors; private descriptors
+wallet name as a QR or JSON file. A closing prompt explains the temporary
+session and offers export. Core supplies the public descriptors; private descriptors
 are never used for this export. The online importer checks that both descriptors are
 public and solvable, creates a wallet with private keys disabled, and delegates
 import and historical scanning to Core. Pruned-away history cannot be recovered
@@ -140,9 +153,15 @@ The cold helper accepts a base64 PSBT from a file, paste, or one QR code decoded
 by the system `zbarcam` utility. Core enriches and decodes it without signing.
 The UI displays every output, the fee, and outputs Core identifies as change.
 Signing is a separate user action. The Core wrapper remembers the exact PSBT
-approved by review, rejects non-ALL/non-DEFAULT input signature modes, checks
-that the unsigned transaction ID still matches the reviewed one, calls
-`walletprocesspsbt`, and checks the transaction ID again. Core does not finalize
+approved by review and rejects non-ALL/non-DEFAULT input signature modes. For
+PSBTv0 it compares Core's unsigned transaction ID before and after signing.
+Core 32.1 decodes PSBTv2 without reconstructing a `tx` object. For that format,
+the wrapper checks every decoded input/output, and makes a domain-separated
+SHA-256 review ID from transaction version, fallback locktime, modification
+flags, previous outpoints, sequences, required input locktimes, and exact output
+amounts/scripts. The UI calls this a **Review ID**, never a transaction ID. The
+same fields must match after `walletprocesspsbt`. Transaction serialization and
+signatures are entirely delegated to Core. Core does not finalize
 or broadcast it. The cold process has no blockchain, so input values and the
 fee displayed from PSBT data are not independently verified against chain
 state; confirm them using the online node or another trusted source. A QR that
@@ -159,8 +178,11 @@ The desktop app uses PySide6 Qt Widgets. The cold helper adds Trezor's
 `python-mnemonic` for BIP39 and BIP32 master-key creation and `qrcode` for QR
 encoding. It uses installed Linux tools for privilege prompts, swap, links and
 optional camera scanning. Core is downloaded and verified separately and is not bundled.
-Review the exact pinned dependencies and the supported Core version whenever
-the app is packaged or updated.
+Direct and transitive Python dependencies are pinned with official wheel
+hashes, installed without dependency resolution, and checked afterward. Review
+upstream advisories and the supported Core version whenever the app is packaged
+or updated. [RELEASE.md](RELEASE.md) describes reproducible source packaging and
+the separate owner-signing/independent-review gates.
 
 The largest remaining engineering risks are lifecycle cleanup after forced
 termination, system-specific network management, Core RPC compatibility,

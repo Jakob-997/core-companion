@@ -1,158 +1,118 @@
 # Core Companion
 
-A Linux-first desktop interface around Bitcoin Core. The online wallet view
-connects to an existing local Core node. Cold signer mode starts a separate,
-temporary Core process; it does not share the online node's wallet or data
-directory.
+A small Linux desktop wallet interface built around Bitcoin Core. Qt Widgets
+provides the screens; Core handles descriptors, key derivation, addresses,
+ownership checks, wallet data, and PSBT review and signing. Trezor's reference
+`python-mnemonic` provides BIP39 and the BIP32 master key.
 
-This is an early development build, not a reviewed wallet release. Do not use it
-to protect funds you cannot afford to lose.
+**0.1.0rc1 is a release candidate for review. Independent security review and
+Debian host-isolation acceptance are still required before a funds-bearing release.**
 
-## Run on Linux
+## Install on Debian
 
-Install Python 3.11+ and the pinned Python dependencies:
+Use Python 3.11–3.15 and a normal desktop user. Do not run the app as root.
 
 ```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-python run.py
+sudo apt update
+sudo apt install -y python3-venv gnupg wget pkexec iproute2 util-linux zbar-tools libegl1 libxcb-cursor0
+python3 install.py
+./core-companion
 ```
 
-Companion finds a running Core's local connection automatically; there is no
-cookie file path to set up. It reads Core's private local credential for each
-request and refuses redirects. Only already-loaded wallets with private keys
-disabled appear in the online view.
+The installer checks the pinned dependency wheel hashes and adds **Core
+Companion** to the applications menu. Keep the application folder in place.
+The private Python environment is managed inside it; no activation is needed.
+Run the installer again after updating source or replacing a release folder.
+`python3 install.py --no-desktop` installs without changing the applications menu.
 
-On Linux x86-64 and ARM64, **Download & verify Bitcoin Core** downloads the
-current stable release, verifies the signed checksum file and archive using
-Bitcoin Core's upstream verifier, then installs the verified package under
-`~/.local/share/core-companion/bitcoin-core/`. The app automatically downloads
-eight pinned release-signing keys into a temporary GPG keyring, checks their
-full fingerprints, and requires three valid signatures. It never changes the
-user's GPG keyring. The fingerprints are listed in `core_download.py` and were
-confirmed as signers of Bitcoin Core v32.1's official `SHA256SUMS.asc`. Key
-rotation requires an app update. GPG and wget are required; on Debian, install
-them with `sudo apt install gnupg wget`. If verification fails, Core is not
-installed.
+Linux x86-64 requires glibc 2.34+ (Debian 12+). ARM64 dependency wheels require
+glibc 2.39+; that platform has not completed release acceptance. Cold signing
+requires a RAM-backed `/dev/shm` and a graphical administrator authorization
+agent. NetworkManager installations also need `nmcli` and `busctl`.
 
-Choose **Online Node** to start the verified Core automatically. Companion uses
-its own node folder, a local cookie, loopback RPC and a 10,000 MiB pruning
-target; blockchain sync starts immediately and continues after Companion closes.
-If a cookie is present in Core's standard data directory, Companion tries that
-node first. If that connection fails, selecting Online Node starts its verified
-node automatically; cold setup does not start online peer networking.
-Downloading Core alone does not start networking, so it is safe to download it
-before setting up a cold signer. The verified binary is also available to the
-cold signer.
+## Choose a wallet mode
 
-The cold signer reuses Companion's verified `bitcoind` to start its separate,
-offline Core process. No file selection or online-node connection is needed.
-Cold mode requires Linux, Core 32.1+, a RAM-backed `/dev/shm`,
-`pkexec`, `iproute2`, and the system swap tools. If NetworkManager is installed,
-`nmcli` and `busctl` are used to turn it off and restore its prior setting.
-Camera scanning additionally needs the Linux `zbarcam` utility, commonly
-provided by `zbar-tools`.
+- **Cold storage:** a separate, temporary Core process with private keys in RAM.
+  Networking and system swap are disabled before it starts. Close other programs
+  first; disabling swap on a low-memory machine can freeze the desktop.
+- **Online node (watch-only):** connect to a local Core or start the app-managed
+  node. Import the public wallet from your signer to view balances and history
+  and generate receiving addresses. This mode has no private keys.
 
-The cold signer defaults to 12 words and requires retyping every word. Its
-entropy screen keeps hashes, the secret live calculation and the exact Python
-reproduction command inside **Audit details**, collapsed by default. These values can recreate the recovery phrase; use only
-a trusted offline computer for verification. The command requires the pinned
-`mnemonic==0.21` package. Details show actual OS-random bytes, the wallet-file
-hash and live dice digits, one exact SHA-256 command and its resulting starting
-entropy. The command prints precisely the entropy bytes used by the wallet.
+The welcome screen downloads and verifies Core when needed. It requires three
+distinct valid signatures from eight pinned release-signing keys and verifies
+the archive checksum using Core's unchanged upstream verifier. Keys are fetched
+into a temporary GPG keyring; your own keyring is untouched. Cold mode requires
+Core 32.1+. Downloading Core does not start blockchain networking.
 
-Its
-watch-only export displays a QR containing the wallet name and public receive
-and change descriptors. Use **Import wallet** in the online view to scan that
-QR or paste its contents. Core validates the descriptors, creates a wallet
-with private keys disabled, and scans available blockchain history. A pruned
-node cannot recover history from blocks it no longer stores; Core reports
-that limitation when importing. Large multisig exports may exceed one QR's
-capacity; their public descriptors remain available as text in Wallet policy.
+The managed online node uses loopback RPC, automatic cookie authentication and
+a 10,000 MiB pruning target. It keeps syncing after the interface closes. An
+existing node in the standard Core directory is tried first. Only loaded
+wallets with private keys disabled appear in the online view. A pruned node
+cannot rescan discarded blocks when importing an older wallet.
 
-The launcher is hidden once the separate cold signer is ready, and reappears
-when that signer closes. Keys remain confined to the short-lived signer
-process. Entropy audit instructions show the file-hash command and the exact
-mixing format; reproducing a phrase also requires its original OS randomness.
+## Cold signing and backups
 
-Cold mode turns off all non-loopback network links and system swap. Close other
-programs first; on a low-memory computer, disabling swap can freeze the
-desktop. The app stops its temporary Core process, removes session files from
-tmpfs, then restores the previous network and swap state when the cold window
-closes normally. If the app is force-stopped, some network links or swap may
-remain disabled until they are restored manually or the computer is restarted.
+Create or recover an English 12, 15, 18, 21 or 24-word BIP39 phrase. New phrases
+default to 12 words, with all words confirmed. The requested entropy recipe
+combines a temporary wallet.dat SHA-256, 32 bytes of OS randomness and optional
+dice rolls. **Audit details**, collapsed by default, contains these secret
+inputs, one reproducible SHA-256 command, and the exact starting entropy.
+That command uses only Python's standard library. Anyone with its inputs can
+recreate the phrase; inspect them only on a trusted offline computer.
 
-For development only, `python run.py --dev-keep-network` leaves host networking
-enabled while exercising the cold-signer flow. Bitcoin Core peer networking
-remains disabled. This mode also adds **Skip confirmation (testing)** on the
-recovery-phrase display and confirmation screens; normal launches require every
-word. System swap is still turned off.
-This bypass weakens the
-host isolation: other programs can still access the network. Use test wallets
-only. Remove this flag before preparing any release build.
+An optional BIP39 passphrase changes the derived wallet. The separate **Encrypt
+wallet** password protects only this session's temporary Core file. They are
+different secrets. Python and Qt cannot guarantee erasure of secret memory.
 
-## Included in this scaffold
+For multisig, prepare your signer and share its BIP87 account key before adding
+the other signers' keys and choosing a threshold. Core validates and imports
+the P2WSH policy. The wizard supports 2–20 signers. Export the completed public
+wallet as a QR or JSON backup; import that into the watch-only node.
 
-See [AUDIT.md](AUDIT.md) for the implementation review, validation performed,
-and remaining security and packaging work. [ARCHITECTURE.md](ARCHITECTURE.md)
-maps the Core boundary and the seed/signing flow.
+**Closing the cold signer deletes its wallet, saved addresses and labels.**
+Keep the recovery phrase, any BIP39 passphrase and address type. Multisig recovery
+also requires the complete public wallet policy and enough signers' private
+backups. A wallet encryption password alone cannot restore a wallet. The app
+prompts before closing a session that contains recovery material or a wallet.
 
-- Existing-node wallet view: balances, history, receiving addresses, labels,
-  address generation and Core PSBT inspection.
-- Short-lived cold Core session with its own mainnet wallet in tmpfs.
-- New English BIP39 phrases based on a SHA-256 temporary `wallet.dat` digest,
-  fresh Linux system randomness and optional dice rolls.
-- BIP39 phrase recovery for 12, 15, 18, 21 or 24 words, with checksum-valid
-  final-word choices when only a partial phrase is entered.
-- Optional BIP39 passphrase and separate temporary Core wallet-file encryption.
-- Single-signature wallet creation or recovery using Core descriptors.
-- BIP87 P2WSH multisig descriptor creation, with signer labels, account xpub
-  origins, threshold selection and Core address ownership verification.
-- PSBT import from file or one base64 QR, Core-backed output and fee review,
-  signing, and signed PSBT export. It never finalizes or broadcasts.
-- QR display for the receive address or local BIP87 signer key, with scanning
-  for other signers' BIP87 keys.
-- Receive-address QR/paste verification using Core's wallet ownership check.
-- Core-generated watch-only wallet export for restoring on the online node.
+Scan a receiving address to check ownership, or import a PSBT from a static QR,
+file or paste. Review every output and fee before signing. Core supplies the
+decoded data and signatures; Companion never finalizes or broadcasts. An
+offline signer cannot independently validate input amounts against the chain.
+Large public exports and PSBTs can be saved to files when one QR is insufficient.
 
-## Not included yet
+When closing normally, Core is stopped and RAM files removed before previous
+swap/network settings are restored. Isolation is checked periodically and
+before private-key operations. This is a desktop precaution, not protection
+against a compromised OS. Forced termination or power loss can interrupt cleanup;
+a restart or manual restoration may be necessary.
 
-- Animated UR/BBQr, multi-frame QR scanning or a camera embedded in the app.
-- Full wallet-policy/descriptor QR scanning and an online-node import wizard.
-- Full PSBT review parity with a hardware wallet, finalization, broadcasting,
-  fee policy controls or coin selection.
-- Automatic Core updates after installation, installers or reproducible app
-  release builds.
-- Windows cold signer. The existing-node desktop view may run elsewhere, but
-  host isolation and cold signing are Linux-only for now.
+## Development
 
-## Key handling notes
+From a source checkout only:
 
-The BIP39 phrase is processed inside a short-lived helper. Trezor's
-`python-mnemonic` creates the 64-byte BIP39 seed and BIP32 master xprv; Core
-derives child keys and descriptors. The helper's core dumps are disabled and it
-is made non-dumpable on Linux, but Python and Qt cannot promise that secret
-bytes are erased from RAM. The `wallet.dat` fingerprint is not itself the BIP39
-phrase or master key.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the process boundaries, entropy
-construction and PSBT review sequence.
-
-## Dependencies
-
-The Linux Core download and verification action also uses the system `gpg` and
-`wget` commands. On Debian, install them with `sudo apt install gnupg wget`.
-
-```text
-PySide6-Essentials==6.10.2
-mnemonic==0.21
-qrcode==8.2
+```sh
+./core-companion --dev-keep-network
 ```
 
-References: [Bitcoin Core download and verification](https://bitcoincore.org/en/download/),
-[Core RPC documentation](https://bitcoincore.org/en/doc/32.0.0/),
+This leaves host networking on, keeps Core peer networking off, still disables
+swap and adds **Skip confirmation (testing)**. Use disposable wallets. The
+release builder disables this flag in the packaged application.
+
+## Review and release
+
+[ARCHITECTURE.md](ARCHITECTURE.md) maps the boundaries and entropy construction.
+[AUDIT.md](AUDIT.md) records checks and limitations. [RELEASE.md](RELEASE.md)
+describes reproducible source packaging and the remaining release gates.
+[SECURITY.md](SECURITY.md) describes the threat model and reporting guidance.
+
+Not yet included: animated QR protocols, transaction creation/finalization/
+broadcast, persistent cold wallet files, Windows cold isolation, signed app
+updates or automatic Core updates. This release is a signer and watch-only
+companion, not a complete replacement for an online spending wallet.
+
+References: [Bitcoin Core](https://bitcoincore.org/en/download/),
 [Trezor python-mnemonic](https://github.com/trezor/python-mnemonic),
 [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki),
-[BIP87](https://github.com/bitcoin/bips/blob/master/bip-0087.mediawiki), and
-[zbarcam](https://manpages.debian.org/testing/zbar-tools/zbarcam.1.en.html).
+[BIP87](https://github.com/bitcoin/bips/blob/master/bip-0087.mediawiki).

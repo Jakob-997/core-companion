@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+app_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+if [ ! -x "$app_dir/.venv/bin/python" ]; then
+    echo "Run python3 install.py in the application folder first." >&2
+    exit 1
+fi
+exec "$app_dir/.venv/bin/python" -E -s -B "$app_dir/run.py" "$@"

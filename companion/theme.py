@@ -35,13 +35,13 @@ QPushButton:hover { background: @surface-2@; border-color: @accent@; }
 QPushButton:focus { border-color: @accent@; }
 QPushButton:pressed { background: @accent-soft@; }
 QPushButton:disabled { color: @muted@; background: @surface-2@; }
-QPushButton#Primary { background: @accent@; border-color: @accent-strong@; color: white; }
+QPushButton#Primary { background: @accent@; border-color: @accent-strong@; color: @button-text@; }
 QPushButton#Primary:hover { background: @accent-strong@; }
-QDialog#ColdSigner QPushButton#Primary { background: @blue@; border-color: @blue@; color: white; }
+QDialog#ColdSigner QPushButton#Primary { background: @blue@; border-color: @blue@; color: @button-text@; }
 QDialog#ColdSigner QPushButton#Primary:hover { background: @blue@; border-color: @blue@; }
-QWidget#OnlinePage QPushButton#Primary { background: @red@; border-color: @red@; color: white; }
+QWidget#OnlinePage QPushButton#Primary { background: @red@; border-color: @red@; color: @button-text@; }
 QWidget#OnlinePage QPushButton#Primary:hover { background: @red@; }
-QMainWindow#OnlineNode QPushButton#OnlineContinue { background: @red@; border-color: @red@; color: white; }
+QMainWindow#OnlineNode QPushButton#OnlineContinue { background: @red@; border-color: @red@; color: @button-text@; }
 QMainWindow#OnlineNode QPushButton#OnlineContinue:hover { background: @red@; }
 QMainWindow#OnlineNode QFrame#ActionPrimary { background: @red-soft@; border-color: @red-border@; }
 QMainWindow#OnlineNode QFrame#ActionPrimary:hover { border-color: @red@; }
@@ -61,8 +61,14 @@ QFrame#ChoiceRadio { border: 1px solid @muted@; border-radius: 9px; background: 
 QFrame#ChoiceRadio[accent="green"][selected="true"] { border: 5px solid @accent@; background: @surface@; }
 QFrame#ChoiceRadio[accent="blue"][selected="true"] { border: 5px solid @blue@; background: @surface@; }
 QFrame#ChoiceRadio[accent="red"][selected="true"] { border: 5px solid @red@; background: @surface@; }
-QMainWindow#OnlineNode QPushButton#ColdContinue { background: @blue@; border-color: @blue@; color: white; }
+QMainWindow#OnlineNode QPushButton#ColdContinue { background: @blue@; border-color: @blue@; color: @button-text@; }
 QMainWindow#OnlineNode QPushButton#ColdContinue:hover { background: @blue@; }
+QPushButton#Primary:disabled, QDialog#ColdSigner QPushButton#Primary:disabled,
+QWidget#OnlinePage QPushButton#Primary:disabled,
+QMainWindow#OnlineNode QPushButton#ColdContinue:disabled,
+QMainWindow#OnlineNode QPushButton#OnlineContinue:disabled {
+    background: @surface-2@; border-color: @border@; color: @muted@;
+}
 QFrame#KPI { background: @surface@; border: 1px solid @border@; border-radius: 10px; }
 QLabel#KPIValue { color: @text@; font-size: 17px; font-weight: 650; }
 QProgressBar { border: 0; border-radius: 4px; background: @surface-2@; }
@@ -126,14 +132,14 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 _PALETTES = {
     False: {
         "page": "#f3f6f8", "surface": "#ffffff", "surface-2": "#f7f9fb",
-        "text": "#18232d", "muted": "#586775", "border": "#d5dfe6",
+        "text": "#18232d", "muted": "#586775", "border": "#d5dfe6", "button-text": "#ffffff",
         "accent": "#16745c", "accent-strong": "#105c49", "accent-soft": "#e5f4ee",
         "blue": "#185fa8", "blue-soft": "#e8f2fd", "blue-border": "#adc8e4",
         "red": "#bd433d", "red-soft": "#fff0ed", "red-border": "#e4b7b4",
     },
     True: {
         "page": "#11171c", "surface": "#192129", "surface-2": "#202a33",
-        "text": "#edf3f7", "muted": "#aab6c0", "border": "#36434e",
+        "text": "#edf3f7", "muted": "#aab6c0", "border": "#36434e", "button-text": "#11171c",
         "accent": "#65c9a0", "accent-strong": "#84ddb8", "accent-soft": "#1e3830",
         "blue": "#83b9ee", "blue-soft": "#203447", "blue-border": "#3e617e",
         "red": "#ff9e94", "red-soft": "#3d282a", "red-border": "#75474a",

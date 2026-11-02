@@ -1,12 +1,13 @@
 """Small shared Qt widgets used by both wallet modes."""
 
 from PySide6.QtCore import QByteArray, Qt, QRectF, Signal
-from PySide6.QtGui import QPainter, QPalette
+from PySide6.QtGui import QFontDatabase, QPainter, QPalette
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 
 _ICONS = {
+    "bitcoin": '<path d="M9 6h5a3 3 0 0 1 0 6H9m0 0h6a3 3 0 0 1 0 6H9V6M7 6h2m-2 12h2M11 3v3m3-3v3m-3 12v3m3-3v3"/>',
     "scan": '<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8m8 0h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16m-8 0H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M7 7h4v4H7zM13 7h4v4h-4zM7 13h4v4H7z"/><path d="M14 14h3v3h-3zM18 13v2m-2 3h2"/>',
     "wallet": '<path d="M4.5 7.5V6A2 2 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5V8"/><path d="M4.5 7.5H18a2 2 0 0 1 2 2v8a2.5 2.5 0 0 1-2.5 2.5h-11a2 2 0 0 1-2-2z"/><path d="M15 11h5v5h-5a2.5 2.5 0 0 1 0-5Z"/>',
     "settings": '<circle cx="12" cy="12" r="3.2"/><path d="m19.4 15 .1.1a1.8 1.8 0 1 1-2.5 2.5l-.1-.1a1.8 1.8 0 0 0-3 .9v.2a1.8 1.8 0 1 1-3.6 0v-.2a1.8 1.8 0 0 0-3-.9l-.1.1a1.8 1.8 0 1 1-2.5-2.5l.1-.1a1.8 1.8 0 0 0-.9-3h-.2a1.8 1.8 0 1 1 0-3.6h.2a1.8 1.8 0 0 0 .9-3l-.1-.1a1.8 1.8 0 1 1 2.5-2.5l.1.1a1.8 1.8 0 0 0 3-.9v-.2a1.8 1.8 0 1 1 3.6 0v.2a1.8 1.8 0 0 0 3 .9l.1-.1a1.8 1.8 0 1 1 2.5 2.5l-.1.1a1.8 1.8 0 0 0 .9 3h.2a1.8 1.8 0 1 1 0 3.6h-.2a1.8 1.8 0 0 0-.9 3Z"/>',
@@ -31,6 +32,12 @@ _ICON_ALIASES = {
     "＋": "new", "↻": "import",
     "i": "help", "◐": "dark", "☼": "light",
 }
+
+
+def fixed_font(size):
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font.setPointSize(size)
+    return font
 
 
 class LineIcon(QLabel):
