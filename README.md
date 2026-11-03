@@ -1,5 +1,9 @@
 # Core Companion
 
+**Design branch:** `design/desktop-polish` explores the native desktop interface.
+It includes new light/dark layouts, wallet identity panels, guided setup, and
+structured transaction review. The release-candidate limitations below still apply.
+
 A small Linux desktop wallet interface built around Bitcoin Core. Qt Widgets
 provides the screens; Core handles descriptors, key derivation, addresses,
 ownership checks, wallet data, and PSBT review and signing. Trezor's reference

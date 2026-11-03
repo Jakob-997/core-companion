@@ -43,6 +43,19 @@ def _label(text, muted=False):
     return widget
 
 
+def _heading(layout, eyebrow, title, description=""):
+    caption = _label(eyebrow)
+    caption.setObjectName("SectionLabel")
+    layout.addWidget(caption)
+    heading = _label(title)
+    heading.setObjectName("Title")
+    layout.addWidget(heading)
+    if description:
+        detail = _label(description)
+        detail.setObjectName("PageDescription")
+        layout.addWidget(detail)
+
+
 def _clear_layout(layout):
     while layout.count():
         item = layout.takeAt(0)
@@ -89,8 +102,8 @@ class ColdSignerDialog(QDialog):
         self.help_targets = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 12, 20, 10)
-        root.setSpacing(9)
+        root.setContentsMargins(24, 18, 24, 12)
+        root.setSpacing(14)
         header = QHBoxLayout()
         mark = LineIcon("bitcoin", "Mark", stroke_width=1.9, inset=4)
         mark.setFixedSize(34, 34)
@@ -99,6 +112,10 @@ class ColdSignerDialog(QDialog):
         brand = _label("Core Companion", False)
         brand.setObjectName("Brand")
         header.addWidget(brand)
+        mode = _label("COLD STORAGE")
+        mode.setObjectName("HeaderMode")
+        header.addSpacing(16)
+        header.addWidget(mode)
         header.addStretch()
         self.help_button = IconButton(
             "i", "Help", self._toggle_help_mode,
@@ -120,6 +137,20 @@ class ColdSignerDialog(QDialog):
             )
             notice.setObjectName("DevNotice")
             root.addWidget(notice)
+        self.workflow = QFrame()
+        self.workflow.setObjectName("WorkflowBar")
+        steps = QHBoxLayout(self.workflow)
+        steps.setContentsMargins(22, 10, 22, 10)
+        steps.setSpacing(24)
+        self.workflow_steps = []
+        for index, text in enumerate(("Wallet", "Recovery", "Protection", "Policy"), 1):
+            step = _label(f"{index:02d}  {text}")
+            step.setObjectName("StepLabel")
+            step.setWordWrap(False)
+            steps.addWidget(step)
+            self.workflow_steps.append(step)
+        steps.addStretch()
+        root.addWidget(self.workflow)
         root.addWidget(self.stack, 1)
         self._build_start_page()
         self._build_entropy_page()
@@ -149,21 +180,33 @@ class ColdSignerDialog(QDialog):
         status.addWidget(self.status_right)
         root.addLayout(status)
         self._install_help_targets()
+        self.stack.currentChanged.connect(self._update_workflow)
         self.stack.setCurrentIndex(15)
+        self._update_workflow(15)
         self._open_core(bitcoind)
+
+    def _update_workflow(self, page):
+        stages = {15: 0, 16: 0, 0: 0, 1: 1, 2: 1, 3: 1, 4: 1, 17: 2, 5: 3}
+        self.workflow.setVisible(page in stages)
+        stage = stages.get(page, 0)
+        for index, label in enumerate(self.workflow_steps):
+            label.setVisible(index < 3 or self.wallet_mode == "multisig")
+            label.setProperty("state", "current" if index == stage else "complete" if index < stage else "upcoming")
+            label.style().unpolish(label)
+            label.style().polish(label)
 
     def _card(self, *, scroll=False):
         page = QWidget()
         page.setObjectName("Page")
         shell = QVBoxLayout(page)
-        shell.setContentsMargins(30, 0, 30, 0)
+        shell.setContentsMargins(0, 0, 0, 0)
         card = QWidget()
         card.setObjectName("Card")
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         shell.addWidget(card, 1)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(22, 20, 22, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(32, 26, 32, 26)
+        layout.setSpacing(16)
         if scroll:
             viewport = QScrollArea()
             viewport.setWidgetResizable(True)
@@ -178,22 +221,23 @@ class ColdSignerDialog(QDialog):
         page = QWidget()
         page.setObjectName("Page")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(30, 16, 30, 16)
-        layout.setSpacing(14)
+        layout.setContentsMargins(4, 10, 4, 10)
+        layout.setSpacing(20)
         self.stack.addWidget(page)
         return layout
 
     def _build_start_page(self):
         layout = self._card()
-        title = _label("Wallet details", False)
-        title.setObjectName("Title")
-        layout.addWidget(title)
+        _heading(layout, "WALLET IDENTITY", "Name your wallet")
+        layout.addWidget(_label("Wallet name"))
         self.wallet_name_input = QLineEdit()
         self.wallet_name_input.setPlaceholderText("Wallet name")
+        self.wallet_name_input.setMaximumWidth(640)
         layout.addWidget(self.wallet_name_input)
         form = QFormLayout()
         self.address_type_form = form
         self.address_type = QComboBox()
+        self.address_type.setMaximumWidth(320)
         for title, code in (
             ("Native SegWit", "bech32"),
             ("Taproot", "bech32m"),
@@ -203,7 +247,7 @@ class ColdSignerDialog(QDialog):
             self.address_type.addItem(title, code)
         form.addRow("Address type", self.address_type)
         layout.addLayout(form)
-
+        layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("‹  Back")
         back.setObjectName("Quiet")
@@ -217,7 +261,7 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_entropy_page(self):
-        layout = self._card()
+        layout = self._card(scroll=True)
         title = _label("Recovery phrase setup", False)
         title.setObjectName("Title")
         layout.addWidget(title)
@@ -269,7 +313,7 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_recovery_page(self):
-        layout = self._card()
+        layout = self._card(scroll=True)
         title = _label("Recover from a BIP39 phrase", False)
         title.setObjectName("Title")
         layout.addWidget(title)
@@ -304,20 +348,20 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_phrase_page(self):
-        layout = self._card()
-        title = _label("Write down your recovery phrase", False)
-        title.setObjectName("Title")
-        layout.addWidget(title)
-        layout.addWidget(_label("Write every word in order. You’ll type the full phrase next.", True))
+        layout = self._card(scroll=True)
+        _heading(layout, "YOUR RECOVERY PHRASE", "Write down these words", "Keep them in order. You’ll enter them again to confirm your backup.")
         self.word_grid = QGridLayout()
-        self.word_grid.setHorizontalSpacing(48)
+        self.word_grid.setHorizontalSpacing(12)
         self.word_grid.setVerticalSpacing(10)
         self.word_labels = []
         words_panel = QWidget()
         words_panel.setLayout(self.word_grid)
-        words_panel.setMaximumWidth(680)
-        layout.addWidget(words_panel, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addStretch()
+        self.word_grid.setContentsMargins(0, 8, 0, 8)
+        layout.addWidget(words_panel)
+        note = _label("Anyone with these words can spend your bitcoin.")
+        note.setObjectName("InfoStrip")
+        layout.addWidget(note)
+        layout.addStretch(1)
         footer = QHBoxLayout()
         back = QPushButton("Back")
         back.clicked.connect(lambda: self.stack.setCurrentIndex(1))
@@ -331,12 +375,11 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_confirm_page(self):
-        layout = self._card()
-        title = _label("Confirm your phrase", False)
-        title.setObjectName("Title")
-        layout.addWidget(title)
-        layout.addWidget(_label("Type every word from your backup in order.", True))
+        layout = self._card(scroll=True)
+        _heading(layout, "CHECK YOUR BACKUP", "Confirm your recovery phrase", "Enter every word from your written backup.")
         self.challenge_form = QGridLayout()
+        self.challenge_form.setHorizontalSpacing(12)
+        self.challenge_form.setVerticalSpacing(10)
         self.challenge_fields = []
         layout.addLayout(self.challenge_form)
         layout.addStretch()
@@ -441,14 +484,24 @@ class ColdSignerDialog(QDialog):
 
     def _build_complete_page(self):
         layout = self._page()
+        workspace_widget = QWidget()
+        workspace_widget.setMaximumHeight(600)
+        workspace = QHBoxLayout(workspace_widget)
+        workspace.setContentsMargins(0, 0, 0, 0)
+        workspace.setSpacing(24)
         identity = QFrame()
-        identity.setObjectName("IdentityPanel")
-        identity_row = QHBoxLayout(identity)
-        identity_row.setContentsMargins(20, 18, 18, 18)
-        identity_row.setSpacing(18)
+        identity.setObjectName("IdentityHero")
+        identity.setMinimumWidth(300)
+        identity.setMaximumWidth(360)
+        identity_row = QVBoxLayout(identity)
+        identity_row.setContentsMargins(28, 28, 28, 28)
+        identity_row.setSpacing(20)
+        self.identity_badge = _label("Cold signer")
+        self.identity_badge.setObjectName("ColdBadge")
+        identity_row.addWidget(self.identity_badge, 0, Qt.AlignmentFlag.AlignLeft)
         self.identity_mark = QWidget()
         self.identity_mark.setObjectName("IdentityMark")
-        self.identity_mark.setFixedSize(60, 60)
+        self.identity_mark.setFixedSize(116, 116)
         self.identity_grid = QGridLayout(self.identity_mark)
         self.identity_grid.setContentsMargins(5, 5, 5, 5)
         self.identity_grid.setSpacing(2)
@@ -458,62 +511,69 @@ class ColdSignerDialog(QDialog):
             tile.setObjectName("IdentityTile")
             self.identity_grid.addWidget(tile, index // 5, index % 5)
             self.identity_tiles.append(tile)
-        identity_row.addWidget(self.identity_mark)
+        identity_row.addWidget(self.identity_mark, 0, Qt.AlignmentFlag.AlignLeft)
         identity_copy = QVBoxLayout()
-        identity_copy.setSpacing(5)
-        identity_title = QHBoxLayout()
-        identity_title.setSpacing(9)
+        identity_copy.setSpacing(8)
         self.identity_name = _label("Cold storage", False)
         self.identity_name.setObjectName("IdentityName")
-        identity_title.addWidget(self.identity_name)
-        self.identity_badge = QLabel("Cold signer")
-        self.identity_badge.setObjectName("ColdBadge")
-        identity_title.addWidget(self.identity_badge)
-        identity_title.addStretch(1)
-        identity_copy.addLayout(identity_title)
-        identity_meta = QHBoxLayout()
-        identity_meta.setSpacing(18)
+        identity_copy.addWidget(self.identity_name)
         self.identity_policy = _label("Single-signature", True)
         self.identity_policy.setObjectName("IdentityMeta")
-        self.identity_fingerprint = _label("Signer · unavailable", True)
-        self.identity_fingerprint.setObjectName("IdentityMeta")
-        identity_meta.addWidget(self.identity_policy)
-        identity_meta.addWidget(self.identity_fingerprint)
-        identity_meta.addStretch(1)
-        identity_copy.addLayout(identity_meta)
-        identity_row.addLayout(identity_copy, 1)
-        change = QPushButton("↔")
-        change.setObjectName("Quiet")
+        identity_copy.addWidget(self.identity_policy)
+        identity_row.addLayout(identity_copy)
+        identity_row.addStretch(1)
+        fingerprint_column = QVBoxLayout()
+        fingerprint_column.setSpacing(10)
+        caption = _label("SIGNER FINGERPRINT")
+        caption.setObjectName("SectionLabel")
+        caption.setWordWrap(False)
+        fingerprint_column.addWidget(caption)
+        self.identity_fingerprint = _label("Unavailable")
+        self.identity_fingerprint.setObjectName("Fingerprint")
+        self.identity_fingerprint.setProperty("hero", True)
+        self.identity_fingerprint.setFont(fixed_font(18))
+        fingerprint_column.addWidget(self.identity_fingerprint)
+        identity_row.addLayout(fingerprint_column)
+        change = IconButton("switch", "Change wallet", self._change_wallet)
         change.setToolTip("Close this temporary signer session before opening another wallet.")
-        change.clicked.connect(self._change_wallet)
-        identity_row.addWidget(change, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(identity)
+        identity_row.addWidget(change, 0, Qt.AlignmentFlag.AlignLeft)
+        workspace.addWidget(identity, 1)
 
-        heading = _label("Choose an action", False)
-        heading.setObjectName("Title")
-        layout.addWidget(heading)
-        actions = QVBoxLayout()
-        actions.setSpacing(9)
+        action_column = QVBoxLayout()
+        action_column.setSpacing(18)
+        eyebrow = _label("WALLET WORKSPACE")
+        eyebrow.setObjectName("SectionLabel")
+        eyebrow.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        action_column.addWidget(eyebrow)
+        heading = _label("Wallet actions", False)
+        heading.setObjectName("HeroTitle")
+        heading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        action_column.addWidget(heading)
         scan = ActionRow(
-            "▦", "Scan QR", "", primary=True,
+            "▦", "Scan QR", "Verify an address or sign a transaction", primary=True, hero=True,
             tooltip="Verify a receive address or review a PSBT before signing.",
         )
         scan.clicked.connect(lambda: self.stack.setCurrentIndex(9))
+        scan.setMaximumHeight(300)
         addresses = ActionRow(
-            "▣", "View wallet addresses", "",
+            "▣", "Wallet addresses", "Addresses and labels",
             tooltip="See saved addresses and labels generated or confirmed by this signer.",
         )
         addresses.clicked.connect(self._open_addresses)
         tools = ActionRow(
-            "⚙", "Tools & Settings", "",
+            "⚙", "Tools & Settings", "Public exports and preferences",
             tooltip="Export the watch-only wallet, view the policy, or change settings.",
         )
         tools.clicked.connect(lambda: self.stack.setCurrentIndex(12))
-        actions.addWidget(scan)
-        actions.addWidget(addresses)
-        actions.addWidget(tools)
-        layout.addLayout(actions)
-        layout.addStretch(1)
+        secondary = QHBoxLayout()
+        secondary.setSpacing(16)
+        secondary.addWidget(addresses, 1)
+        secondary.addWidget(tools, 1)
+        action_column.addWidget(scan, 1)
+        action_column.addLayout(secondary)
+        workspace.addLayout(action_column, 3)
+        layout.addWidget(workspace_widget, 1)
+        layout.addStretch()
 
     def _build_scan_page(self):
         layout = self._card()
@@ -661,17 +721,16 @@ class ColdSignerDialog(QDialog):
 
     def _build_setup_page(self):
         layout = self._page()
-        heading = _label("Wallet setup", False)
-        heading.setObjectName("Title")
-        layout.addWidget(heading)
-        choices = QVBoxLayout()
-        choices.setSpacing(0)
-        self.create_choice = ChoiceRow("＋", "Create a new wallet", accent="blue")
+        _heading(layout, "GET STARTED", "Wallet setup")
+        choices = QHBoxLayout()
+        choices.setSpacing(20)
+        self.create_choice = ChoiceRow("new", "Create a new wallet", accent="blue", card=True,
+                                       tooltip="Generate a new BIP39 recovery phrase for this cold signer.")
         self.create_choice.clicked.connect(lambda: self._choose_setup("new"))
-        self.recover_choice = ChoiceRow("↻", "Use an existing wallet", accent="blue")
+        self.recover_choice = ChoiceRow("import", "Use an existing wallet", accent="blue", card=True,
+                                        tooltip="Recover a wallet from your existing English BIP39 recovery phrase.")
         self.recover_choice.clicked.connect(lambda: self._choose_setup("recover"))
         choices.addWidget(self.create_choice)
-        choices.addLayout(self._or_separator())
         choices.addWidget(self.recover_choice)
         layout.addLayout(choices)
         layout.addStretch()
@@ -690,21 +749,20 @@ class ColdSignerDialog(QDialog):
 
     def _build_type_page(self):
         layout = self._page()
-        heading = _label("Choose wallet type", False)
-        heading.setObjectName("Title")
-        layout.addWidget(heading)
-        choices = QVBoxLayout()
-        choices.setSpacing(0)
+        _heading(layout, "SIGNING POLICY", "Choose wallet type")
+        choices = QHBoxLayout()
+        choices.setSpacing(20)
         self.single_choice = ChoiceRow(
-            "◉", "Single-signature", "One key creates and signs for this wallet.", accent="blue"
+            "key", "Single signature", accent="blue", card=True,
+            tooltip="One private key controls this wallet. Keep its recovery phrase as your backup."
         )
         self.single_choice.clicked.connect(lambda: self._choose_type("single"))
         self.multi_choice = ChoiceRow(
-            "⌘", "Multisig · BIP87", "Several signers share the wallet; choose the required threshold.", accent="blue"
+            "multisig", "Multisig", accent="blue", card=True,
+            tooltip="Several signers share a BIP87 wallet. Choose how many signatures are required and add each signer’s public key."
         )
         self.multi_choice.clicked.connect(lambda: self._choose_type("multisig"))
         choices.addWidget(self.single_choice)
-        choices.addLayout(self._or_separator())
         choices.addWidget(self.multi_choice)
         layout.addLayout(choices)
         layout.addStretch()
@@ -721,24 +779,8 @@ class ColdSignerDialog(QDialog):
         footer.addWidget(self.type_continue)
         layout.addLayout(footer)
 
-    @staticmethod
-    def _or_separator():
-        divider = QHBoxLayout()
-        divider.setContentsMargins(0, 5, 0, 5)
-        divider.addStretch(1)
-        left_rule = QFrame()
-        left_rule.setFrameShape(QFrame.Shape.HLine)
-        left_rule.setObjectName("ChoiceDivider")
-        right_rule = QFrame()
-        right_rule.setFrameShape(QFrame.Shape.HLine)
-        right_rule.setObjectName("ChoiceDivider")
-        divider.addWidget(left_rule, 1)
-        divider.addWidget(_label("OR", True))
-        divider.addWidget(right_rule, 1)
-        return divider
-
     def _build_protection_page(self):
-        layout = self._card()
+        layout = self._card(scroll=True)
         heading = _label("Wallet protection", False)
         heading.setObjectName("Title")
         layout.addWidget(heading)
@@ -941,36 +983,78 @@ class ColdSignerDialog(QDialog):
 
     def _build_psbt_page(self):
         layout = self._card(scroll=True)
-        title = _label("Review and sign a transaction", False)
-        title.setObjectName("Title")
-        layout.addWidget(title)
-        layout.addWidget(_label(
-            "Import a PSBT, verify every recipient, amount, fee and change output, then sign. "
-            "Input amounts and fee come from the PSBT, not a local blockchain. This signer never broadcasts.", True
-        ))
+        heading = QHBoxLayout()
+        heading_copy = QVBoxLayout()
+        _heading(heading_copy, "TRANSACTION SIGNING", "Review, then sign", "Check every address and amount before signing.")
+        heading.addLayout(heading_copy, 1)
+        back = IconButton("back", "Back to wallet", lambda: self.stack.setCurrentIndex(6))
+        heading.addWidget(back, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(heading)
+
+        self.psbt_import_panel = QFrame()
+        self.psbt_import_panel.setObjectName("SubtlePanel")
+        import_layout = QVBoxLayout(self.psbt_import_panel)
+        import_layout.setContentsMargins(20, 18, 20, 18)
+        import_layout.setSpacing(12)
+        import_title = _label("Import an unsigned transaction")
+        import_title.setObjectName("Heading")
+        import_layout.addWidget(import_title)
         self.psbt_input = QPlainTextEdit()
-        self.psbt_input.setPlaceholderText("Paste a base64 PSBT, import a file, or scan one QR code")
-        self.psbt_input.setMaximumHeight(115)
+        self.psbt_input.setPlaceholderText("Paste a PSBT, scan a QR code, or choose a file")
+        self.psbt_input.setFixedHeight(88)
         self.psbt_input.textChanged.connect(self._invalidate_psbt_review)
-        layout.addWidget(self.psbt_input)
+        import_layout.addWidget(self.psbt_input)
         controls = QHBoxLayout()
-        scan = QPushButton("Scan QR with zbarcam")
-        scan.clicked.connect(self._start_qr_scanner)
+        scan = IconButton("scan", "Scan QR", lambda: self._start_qr_scanner(),
+                          tooltip="Open the camera to import an unsigned transaction from a QR code.")
         controls.addWidget(scan)
-        load = QPushButton("Import file…")
-        load.clicked.connect(self._load_psbt_file)
+        load = IconButton("file", "Choose file…", self._load_psbt_file,
+                          tooltip="Import a binary or base64 PSBT file for Core to review.")
         controls.addWidget(load)
+        controls.addStretch()
         review = QPushButton("Review transaction")
         review.setObjectName("Primary")
         review.clicked.connect(self._review_psbt)
         controls.addWidget(review)
-        controls.addStretch()
-        layout.addLayout(controls)
+        import_layout.addLayout(controls)
+        layout.addWidget(self.psbt_import_panel)
+
+        self.review_panel = QWidget()
+        self.review_layout = QVBoxLayout(self.review_panel)
+        self.review_layout.setContentsMargins(0, 0, 0, 0)
+        self.review_layout.setSpacing(12)
+        layout.addWidget(self.review_panel)
+        self.review_panel.hide()
+
+        detail_controls = QHBoxLayout()
+        self.review_details_toggle = QPushButton("Show Core details")
+        self.review_details_toggle.setObjectName("Quiet")
+        self.review_details_toggle.setCheckable(True)
+        self.review_details_toggle.setToolTip("Show Core’s complete review, including every output, the transaction identifier, fee, and locktime.")
+        self.review_details_toggle.hide()
+        detail_controls.addWidget(self.review_details_toggle)
+        detail_controls.addStretch()
+        self.replace_psbt_button = IconButton("refresh", "Replace transaction", self._replace_transaction,
+                                             tooltip="Discard this review and import or review a transaction again before signing.")
+        self.replace_psbt_button.hide()
+        detail_controls.addWidget(self.replace_psbt_button)
+        layout.addLayout(detail_controls)
         self.psbt_review = QPlainTextEdit()
         self.psbt_review.setReadOnly(True)
-        self.psbt_review.setPlaceholderText("Transaction details from Bitcoin Core will appear here.")
-        self.psbt_review.setMaximumHeight(175)
+        self.psbt_review.setFixedHeight(190)
+        self.psbt_review.setFont(fixed_font(10))
+        self.psbt_review.hide()
+        self.review_details_toggle.toggled.connect(self.psbt_review.setVisible)
         layout.addWidget(self.psbt_review)
+
+        self.authorize_panel = QFrame()
+        self.authorize_panel.setObjectName("SubtlePanel")
+        authorize = QVBoxLayout(self.authorize_panel)
+        authorize.setContentsMargins(20, 16, 20, 16)
+        authorize.setSpacing(12)
+        caution = _label("Amounts and fees come from the PSBT. This offline signer cannot verify them against the blockchain.")
+        caution.setObjectName("FooterNote")
+        authorize.addWidget(caution)
         password_row = QHBoxLayout()
         self.signer_password = QLineEdit()
         self.signer_password.setPlaceholderText("Wallet password, if encrypted")
@@ -983,15 +1067,31 @@ class ColdSignerDialog(QDialog):
             )
         )
         password_row.addWidget(self.show_signer_password)
-        layout.addLayout(password_row)
+        authorize.addLayout(password_row)
+        sign_row = QHBoxLayout()
+        sign_note = _label("Signing does not broadcast this transaction.")
+        sign_note.setObjectName("FooterNote")
+        sign_row.addWidget(sign_note, 1)
         self.sign_button = QPushButton("Sign reviewed transaction")
         self.sign_button.setObjectName("Primary")
         self.sign_button.setEnabled(False)
         self.sign_button.clicked.connect(self._sign_reviewed_psbt)
-        layout.addWidget(self.sign_button, 0, Qt.AlignmentFlag.AlignRight)
+        sign_row.addWidget(self.sign_button)
+        authorize.addLayout(sign_row)
+        layout.addWidget(self.authorize_panel)
+        self.authorize_panel.hide()
+
+        self.signed_panel = QFrame()
+        self.signed_panel.setObjectName("SubtlePanel")
+        signed_layout = QVBoxLayout(self.signed_panel)
+        signed_layout.setContentsMargins(20, 18, 20, 18)
+        signed_title = _label("Signature added")
+        signed_title.setObjectName("Heading")
+        signed_layout.addWidget(signed_title)
         signed_row = QHBoxLayout()
         self.signed_qr = QLabel()
         self.signed_qr.setFixedSize(320, 320)
+        self.signed_qr.setObjectName("QR")
         self.signed_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.signed_qr.hide()
         signed_row.addWidget(self.signed_qr, 0, Qt.AlignmentFlag.AlignTop)
@@ -1007,14 +1107,92 @@ class ColdSignerDialog(QDialog):
         save.clicked.connect(self._save_signed_psbt)
         signed_details.addWidget(save, 0, Qt.AlignmentFlag.AlignLeft)
         signed_row.addLayout(signed_details, 1)
-        layout.addLayout(signed_row)
+        signed_layout.addLayout(signed_row)
+        layout.addWidget(self.signed_panel)
+        self.signed_panel.hide()
         layout.addStretch()
-        footer = QHBoxLayout()
-        back = QPushButton("Back to wallet")
-        back.clicked.connect(lambda: self.stack.setCurrentIndex(6))
-        footer.addWidget(back)
-        footer.addStretch()
-        layout.addLayout(footer)
+
+    def _replace_transaction(self):
+        self._invalidate_psbt_review()
+        self.psbt_import_panel.show()
+        self.psbt_input.setFocus()
+
+    def _render_transaction_review(self, review):
+        """Present every Core-reviewed output without shortening addresses or scripts."""
+        _clear_layout(self.review_layout)
+        summary = QFrame()
+        summary.setObjectName("SubtlePanel")
+        metrics = QHBoxLayout(summary)
+        metrics.setContentsMargins(20, 16, 20, 16)
+        fee = review["fee"]
+        for caption, value in (
+            ("OUTPUTS", str(len(review["outputs"]))),
+            ("NETWORK FEE", f"{Decimal(str(fee)):.8f} BTC" if fee is not None else "Unavailable"),
+            ("INPUTS", str(review["inputs"])),
+        ):
+            column = QVBoxLayout()
+            label = _label(caption)
+            label.setObjectName("SectionLabel")
+            column.addWidget(label)
+            amount = _label(value)
+            amount.setObjectName("KPIValue")
+            column.addWidget(amount)
+            metrics.addLayout(column, 1)
+        self.review_layout.addWidget(summary)
+        # Keep untrusted PSBTs from creating an unbounded number of widgets.
+        # Larger reviews use the complete text view, with every output intact.
+        outputs = review["outputs"]
+        structured = len(outputs) <= 24 and all(
+            len(output["address"]) <= 256 and len(output["script"]) <= 512 for output in outputs
+        )
+        if not structured:
+            note = _label("This transaction needs the detailed view. Review every output in Core details below.")
+            note.setObjectName("InfoStrip")
+            self.review_layout.addWidget(note)
+        for index, output in enumerate(outputs if structured else (), 1):
+            card = QFrame()
+            card.setObjectName("Surface")
+            content = QVBoxLayout(card)
+            content.setContentsMargins(20, 16, 20, 16)
+            content.setSpacing(8)
+            line = QHBoxLayout()
+            role = "Change · Core verified" if output["is_change"] else (
+                "Own address" if output["is_mine"] else "Recipient · verify address"
+            )
+            caption = _label(f"{index:02d}  {role}")
+            caption.setObjectName("SectionLabel")
+            line.addWidget(caption, 1)
+            value = output["amount"]
+            amount = _label(f"{Decimal(str(value)):.8f} BTC" if value is not None else "Amount unavailable")
+            amount.setObjectName("Heading")
+            line.addWidget(amount)
+            content.addLayout(line)
+            address = _label(output["address"])
+            address.setObjectName("ReviewAddress")
+            address.setFont(fixed_font(11))
+            address.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+            content.addWidget(address)
+            if output["address"].startswith("(non-standard"):
+                script = _label(output["script"])
+                script.setFont(fixed_font(10))
+                script.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                content.addWidget(script)
+            self.review_layout.addWidget(card)
+        states = review.get("analysis", {}).get("inputs", [])
+        missing = sum(item.get("has_utxo") is not True for item in states)
+        if missing:
+            warning = _label(f"Core could not verify UTXO details for {missing} input(s).")
+            warning.setObjectName("ReviewWarning")
+            self.review_layout.addWidget(warning)
+        self.review_panel.show()
+        self.psbt_import_panel.hide()
+        self.review_details_toggle.show()
+        self.review_details_toggle.setChecked(not structured)
+        self.psbt_review.setFixedHeight(190 if structured else 320)
+        self.replace_psbt_button.show()
+        self.authorize_panel.show()
+        self.signer_password.setVisible(self.wallet_encrypted)
+        self.show_signer_password.setVisible(self.wallet_encrypted)
 
     def _build_verify_address_page(self):
         layout = self._card()
@@ -1196,14 +1374,24 @@ class ColdSignerDialog(QDialog):
     def _render_words(self):
         _clear_layout(self.word_grid)
         self.word_labels = []
-        rows = (len(self.words) + 1) // 2
+        columns = 4 if len(self.words) > 18 else 3
+        rows = (len(self.words) + columns - 1) // columns
         for index, word in enumerate(self.words):
-            column = 0 if index < rows else 1
-            row = index if column == 0 else index - rows
-            item = QLabel(f"{index + 1:02d}   {word}")
-            item.setFont(fixed_font(12))
+            tile = QFrame()
+            tile.setObjectName("WordTile")
+            line = QHBoxLayout(tile)
+            line.setContentsMargins(14, 10, 14, 10)
+            line.setSpacing(14)
+            number = _label(f"{index + 1:02d}")
+            number.setObjectName("WordNumber")
+            number.setWordWrap(False)
+            line.addWidget(number)
+            item = _label(word)
+            item.setObjectName("WordText")
+            item.setWordWrap(False)
             item.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-            self.word_grid.addWidget(item, row, column)
+            line.addWidget(item, 1)
+            self.word_grid.addWidget(tile, index % rows, index // rows)
             self.word_labels.append(item)
 
     def _clear_recovery_candidates(self):
@@ -1435,7 +1623,7 @@ class ColdSignerDialog(QDialog):
         self.identity_name.setText(self.wallet_display_name)
         self.identity_policy.setText(wallet_type)
         self.identity_fingerprint.setText(
-            f"Signer · {self.wallet_fingerprint}" if self.wallet_fingerprint else "Signer fingerprint unavailable from Core"
+            self.wallet_fingerprint if self.wallet_fingerprint else "Unavailable"
         )
         self.policy_identity.setText(
             f"{self.wallet_display_name}  ·  {wallet_type}\n"
@@ -1582,6 +1770,14 @@ class ColdSignerDialog(QDialog):
         self.reviewed_psbt = None
         self.reviewed_id = None
         self.sign_button.setEnabled(False)
+        self.review_panel.hide()
+        _clear_layout(self.review_layout)
+        self.authorize_panel.hide()
+        self.review_details_toggle.setChecked(False)
+        self.review_details_toggle.hide()
+        self.replace_psbt_button.hide()
+        self.signed_panel.hide()
+        self.psbt_import_panel.show()
         self.psbt_review.clear()
         self.signed_psbt.clear()
         self.signed_status.clear()
@@ -1749,6 +1945,7 @@ class ColdSignerDialog(QDialog):
         if missing_utxos:
             lines.extend(("", f"Warning: Core could not verify UTXO details for {missing_utxos} input(s)."))
         self.psbt_review.setPlainText("\n".join(lines))
+        self._render_transaction_review(review)
         self.sign_button.setEnabled(True)
         self.signed_status.setText("")
 
@@ -1763,11 +1960,13 @@ class ColdSignerDialog(QDialog):
             result = self.core.sign_psbt(self.reviewed_psbt, password, self.reviewed_id)
         except ColdSetupError as exc:
             self.signer_password.clear()
-            self.sign_button.setEnabled(False)
+            self._replace_transaction()
             QMessageBox.warning(self, "Signing failed", str(exc))
             return
         self.signer_password.clear()
         self.sign_button.setEnabled(False)
+        self.authorize_panel.hide()
+        self.signed_panel.show()
         self.signed_psbt.setPlainText(result["psbt"])
         completion = "All inputs have signatures" if result["complete"] else "Partially signed · additional signer(s) required"
         self.signed_status.setText(completion + ". The transaction was not finalized or broadcast.")

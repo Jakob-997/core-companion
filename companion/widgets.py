@@ -7,6 +7,21 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLay
 
 
 _ICONS = {
+    "back": '<path d="m14 6-6 6 6 6"/>',
+    "chevron-right": '<path d="m9 6 6 6-6 6"/>',
+    "arrow-right": '<path d="M4 12h15m-6-6 6 6-6 6"/>',
+    "check": '<path d="m5 12 4 4L19 6"/>',
+    "lock": '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4m-4 4v3"/>',
+    "copy": '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+    "switch": '<path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/>',
+    "dice": '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 8h.01M16 8h.01M12 12h.01M8 16h.01M16 16h.01"/>',
+    "warning": '<path d="M10.2 4.5 2.9 17a2 2 0 0 0 1.7 3h14.8a2 2 0 0 0 1.7-3L13.8 4.5a2.1 2.1 0 0 0-3.6 0ZM12 9v4m0 3h.01"/>',
+    "info": '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
+    "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "download": '<path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4"/>',
+    "refresh": '<path d="M20 10a8 8 0 0 0-14-3L3 10m0-6v6h6M4 14a8 8 0 0 0 14 3l3-3m0 6v-6h-6"/>',
+    "file": '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Zm0 0v6h6M8 13h8m-8 4h5"/>',
+    "shield-check": '<path d="m12 3 8 3v6c0 4-4 7-8 9-4-2-8-5-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/>',
     "bitcoin": '<path d="M9 6h5a3 3 0 0 1 0 6H9m0 0h6a3 3 0 0 1 0 6H9V6M7 6h2m-2 12h2M11 3v3m3-3v3m-3 12v3m3-3v3"/>',
     "scan": '<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8m8 0h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16m-8 0H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M7 7h4v4H7zM13 7h4v4h-4zM7 13h4v4H7z"/><path d="M14 14h3v3h-3zM18 13v2m-2 3h2"/>',
     "wallet": '<path d="M4.5 7.5V6A2 2 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5V8"/><path d="M4.5 7.5H18a2 2 0 0 1 2 2v8a2.5 2.5 0 0 1-2.5 2.5h-11a2 2 0 0 1-2-2z"/><path d="M15 11h5v5h-5a2.5 2.5 0 0 1 0-5Z"/>',
@@ -79,57 +94,120 @@ class LineIcon(QLabel):
 class ActionRow(QFrame):
     clicked = Signal()
 
-    def __init__(self, symbol, title, description, *, primary=False, tooltip="", icon_key=None):
+    def __init__(self, symbol, title, description, *, primary=False, tooltip="", icon_key=None, hero=False):
         super().__init__()
         self.setObjectName("ActionPrimary" if primary else "ActionRow")
+        self.setProperty("hero", hero)
+        self.setProperty("pressed", False)
+        self._pointer_down = False
+        self._key_down = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(title)
+        self.setAccessibleDescription(description or tooltip)
         self.setToolTip(tooltip or description)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(14, 10, 14, 10)
-        row.setSpacing(13)
-        icon = LineIcon(icon_key or symbol, "BlueIcon")
-        icon.setFixedSize(36, 36)
-        icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        row.addWidget(icon)
+        row = QVBoxLayout(self) if hero else QHBoxLayout(self)
+        if hero:
+            row.setContentsMargins(24, 22, 24, 22)
+        else:
+            row.setContentsMargins(18, 15, 18, 15)
+        row.setSpacing(16)
+        self.icon = LineIcon(icon_key or symbol, "BlueIcon", inset=11 if hero else 9)
+        icon_size = 48 if hero else 42
+        self.icon.setFixedSize(icon_size, icon_size)
+        self.arrow = LineIcon("arrow-right" if hero else "chevron-right", "ActionChevron", inset=0, stroke_width=1.8)
+        self.arrow.setFixedSize(20, 20)
+        if hero:
+            top = QHBoxLayout()
+            top.addWidget(self.icon)
+            top.addStretch()
+            top.addWidget(self.arrow)
+            row.addLayout(top)
+            row.addStretch()
+        else:
+            row.addWidget(self.icon)
         copy = QVBoxLayout()
-        copy.setSpacing(2)
-        heading = QLabel(title)
-        heading.setObjectName("ActionTitle")
-        heading.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        copy.addWidget(heading)
+        copy.setSpacing(6 if hero else 4)
+        copy.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.title_label = QLabel(title)
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.title_label.setWordWrap(True)
+        self.title_label.setObjectName("ActionTitle")
+        self.title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        copy.addWidget(self.title_label)
         if description:
             detail = QLabel(description)
-            detail.setObjectName("Muted")
+            detail.setTextFormat(Qt.TextFormat.PlainText)
+            detail.setObjectName("ActionDescription")
             detail.setWordWrap(True)
             detail.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             copy.addWidget(detail)
-        row.addLayout(copy, 1)
-        arrow = QLabel("›")
-        arrow.setObjectName("Muted")
-        arrow.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        row.addWidget(arrow)
+        row.addLayout(copy, 0 if hero else 1)
+        if not hero:
+            row.addWidget(self.arrow)
+
+    def _set_pressed(self, pressed):
+        self.setProperty("pressed", pressed)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.setFocus()
-            self.clicked.emit()
+            self._pointer_down = True
+            self._set_pressed(True)
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pointer_down:
+            self._set_pressed(self.rect().contains(event.position().toPoint()))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._pointer_down:
+            self._pointer_down = False
+            self._set_pressed(False)
+            event.accept()
+            if self.isEnabled() and self.rect().contains(event.position().toPoint()):
+                self.clicked.emit()
+            return
+        super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Space):
-            self.clicked.emit()
+            if not event.isAutoRepeat():
+                self._key_down = True
+                self._set_pressed(True)
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Space):
+            if not event.isAutoRepeat() and self._key_down:
+                self._key_down = False
+                self._set_pressed(False)
+                self.clicked.emit()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        self._pointer_down = False
+        self._key_down = False
+        self._set_pressed(False)
+        super().focusOutEvent(event)
 
 
 class ChoiceRow(QPushButton):
     """Compact selectable row matching the wallet mode and setup screens."""
 
-    def __init__(self, symbol, title, description="", *, accent="green", tooltip=""):
+    def __init__(self, symbol, title, description="", *, accent="green", tooltip="", card=False):
         super().__init__()
-        self.setObjectName("ChoiceRow")
+        self.setObjectName("ModeCard" if card else "ChoiceRow")
         self.setProperty("accent", accent)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -139,35 +217,50 @@ class ChoiceRow(QPushButton):
             self.setAccessibleDescription(description)
         self.setToolTip(tooltip or description or title)
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(14, 10, 14, 10)
+        row = QVBoxLayout(self) if card else QHBoxLayout(self)
+        if card:
+            row.setContentsMargins(24, 24, 24, 24)
+        else:
+            row.setContentsMargins(16, 12, 16, 12)
         row.setSpacing(13)
         icon = LineIcon(symbol, "ChoiceIcon")
-        icon.setFixedSize(34, 34)
+        icon_size = 52 if card else 38
+        icon.setFixedSize(icon_size, icon_size)
         icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        row.addWidget(icon)
-
-        copy = QVBoxLayout()
-        copy.setSpacing(2)
-        heading = QLabel(title)
-        heading.setObjectName("ChoiceTitle")
-        heading.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        copy.addWidget(heading)
-        if description:
-            detail = QLabel(description)
-            detail.setObjectName("ChoiceDescription")
-            detail.setWordWrap(True)
-            detail.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            copy.addWidget(detail)
-        row.addLayout(copy, 1)
-
         self.radio = QFrame()
         self.radio.setObjectName("ChoiceRadio")
         self.radio.setProperty("accent", accent)
         self.radio.setProperty("selected", False)
         self.radio.setFixedSize(17, 17)
         self.radio.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        row.addWidget(self.radio)
+        if card:
+            top = QHBoxLayout()
+            top.addWidget(icon)
+            top.addStretch()
+            top.addWidget(self.radio, 0, Qt.AlignmentFlag.AlignTop)
+            row.addLayout(top)
+            row.addSpacing(20)
+        else:
+            row.addWidget(icon)
+
+        copy = QVBoxLayout()
+        copy.setSpacing(2)
+        heading = QLabel(title)
+        heading.setTextFormat(Qt.TextFormat.PlainText)
+        heading.setWordWrap(True)
+        heading.setObjectName("ChoiceTitle")
+        heading.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        copy.addWidget(heading)
+        if description:
+            detail = QLabel(description)
+            detail.setTextFormat(Qt.TextFormat.PlainText)
+            detail.setObjectName("ChoiceDescription")
+            detail.setWordWrap(True)
+            detail.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            copy.addWidget(detail)
+        row.addLayout(copy, 0 if card else 1)
+        if not card:
+            row.addWidget(self.radio)
         self.toggled.connect(self._show_selection)
         self._show_selection(self.isChecked())
 

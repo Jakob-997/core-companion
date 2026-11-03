@@ -1,0 +1,39 @@
+# Desktop design branch
+
+`design/desktop-polish` is an interface exploration for review alongside `main`.
+The application uses native PySide6 Qt Widgets and the existing dependency lock.
+
+## Direction
+
+- A precise desktop workspace with clear text and consistent line icons.
+- Blue identifies cold storage; red identifies the online watch-only node.
+- Both light and dark themes have explicit text, border, focus and error colors.
+- Wallet identity and signer fingerprint are prominent. The visual fingerprint
+  is a recognition aid; it is not a substitute for checking the wallet policy.
+- Setup has a compact progress strip. Optional explanations live in tooltips
+  and entropy audit data stays collapsed.
+- Recovery words appear in numbered tiles. Confirmation and session cleanup
+  continue to clear the visible secret fields.
+- Transaction review separates every output, amount and classification supplied
+  by Core. Addresses and nonstandard scripts are shown in full. Large or complex
+  reviews use the complete text view to bound the number of created widgets.
+- Editing or replacing a PSBT revokes its review. Signing continues to pass
+  Core's canonical PSBT and the exact reviewed transaction identifier.
+
+## Review map
+
+`companion/theme.py` contains the shared palettes and styles;
+`companion/widgets.py` contains icons, selectable choices and action controls.
+`companion/ui.py` contains the welcome and online layouts;
+`companion/cold_ui.py` contains the signer screens and review presentation.
+
+The branch makes no changes to the RPC client, wallet service, entropy recipe,
+Core download verification, offline Core implementation, host isolation,
+dependency lock, or installer.
+
+Native Qt views were rendered in light/dark modes at 1280×850 and 980×680
+using public fixtures. Linux signer screens were also rendered in the existing
+WSL environment. UI checks cover complete detailed reviews, PSBT review
+invalidation, canonical signing arguments, recovery-field clearing, and
+mouse/keyboard activation. These checks do not constitute a security audit or
+replace Debian host-isolation acceptance.
