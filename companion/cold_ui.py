@@ -13,7 +13,7 @@ from .scanner import QRScanner
 from qrcode.exceptions import DataOverflowError
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QPlainTextEdit,
     QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QToolTip, QSizePolicy,
@@ -31,7 +31,7 @@ from .seed import (
     validate_phrase,
 )
 from .theme import stylesheet
-from .widgets import ActionRow, ChoiceRow, FingerprintMark, IconButton, LineIcon, ScanIllustration, fixed_font
+from .widgets import ActionRow, ChoiceRow, ComboBox, EmptyTable, FingerprintMark, IconButton, LineIcon, ScanIllustration, fixed_font
 
 
 def _label(text, muted=False):
@@ -54,6 +54,24 @@ def _heading(layout, eyebrow, title, description=""):
         detail = _label(description)
         detail.setObjectName("PageDescription")
         layout.addWidget(detail)
+
+
+def _panel(layout, title="", hint=""):
+    panel = QFrame()
+    panel.setObjectName("FormPanel")
+    content = QVBoxLayout(panel)
+    content.setContentsMargins(22, 20, 22, 20)
+    content.setSpacing(14)
+    if title:
+        heading = _label(title)
+        heading.setObjectName("FormTitle")
+        content.addWidget(heading)
+    if hint:
+        detail = _label(hint)
+        detail.setObjectName("FormHint")
+        content.addWidget(detail)
+    layout.addWidget(panel)
+    return content
 
 
 def _clear_layout(layout):
@@ -179,6 +197,8 @@ class ColdSignerDialog(QDialog):
         status.addStretch()
         status.addWidget(self.status_right)
         root.addLayout(status)
+        for control in self.findChildren(QPushButton):
+            control.setAutoDefault(False)
         self._install_help_targets()
         self.stack.currentChanged.connect(self._update_workflow)
         self.stack.setCurrentIndex(15)
@@ -195,17 +215,20 @@ class ColdSignerDialog(QDialog):
             label.style().unpolish(label)
             label.style().polish(label)
 
-    def _card(self, *, scroll=False):
+    def _card(self, *, scroll=False, surface=True):
         page = QWidget()
         page.setObjectName("Page")
         shell = QVBoxLayout(page)
         shell.setContentsMargins(0, 0, 0, 0)
         card = QWidget()
-        card.setObjectName("Card")
+        card.setObjectName("Card" if surface else "PageContent")
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         shell.addWidget(card, 1)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(32, 26, 32, 26)
+        if surface:
+            layout.setContentsMargins(32, 26, 32, 26)
+        else:
+            layout.setContentsMargins(4, 10, 4, 10)
         layout.setSpacing(16)
         if scroll:
             viewport = QScrollArea()
@@ -227,17 +250,27 @@ class ColdSignerDialog(QDialog):
         return layout
 
     def _build_start_page(self):
-        layout = self._card()
+        layout = self._card(surface=False)
         _heading(layout, "WALLET IDENTITY", "Name your wallet")
-        layout.addWidget(_label("Wallet name"))
+        details = _panel(layout)
+        fields = QHBoxLayout()
+        fields.setSpacing(24)
+        name_column = QVBoxLayout()
+        name_column.setSpacing(10)
+        caption = _label("Wallet name")
+        caption.setObjectName("FieldLabel")
+        name_column.addWidget(caption)
         self.wallet_name_input = QLineEdit()
         self.wallet_name_input.setPlaceholderText("Wallet name")
-        self.wallet_name_input.setMaximumWidth(640)
-        layout.addWidget(self.wallet_name_input)
+        self.wallet_name_input.returnPressed.connect(self._continue_wallet_setup)
+        caption.setBuddy(self.wallet_name_input)
+        name_column.addWidget(self.wallet_name_input)
+        fields.addLayout(name_column, 2)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        form.setVerticalSpacing(10)
         self.address_type_form = form
-        self.address_type = QComboBox()
-        self.address_type.setMaximumWidth(320)
+        self.address_type = ComboBox()
         for title, code in (
             ("Native SegWit", "bech32"),
             ("Taproot", "bech32m"),
@@ -246,7 +279,8 @@ class ColdSignerDialog(QDialog):
         ):
             self.address_type.addItem(title, code)
         form.addRow("Address type", self.address_type)
-        layout.addLayout(form)
+        fields.addLayout(form, 1)
+        details.addLayout(fields)
         layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("‹  Back")
@@ -261,42 +295,58 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_entropy_page(self):
-        layout = self._card(scroll=True)
-        title = _label("Recovery phrase setup", False)
-        title.setObjectName("Title")
-        layout.addWidget(title)
+        layout = self._card(scroll=True, surface=False)
+        _heading(layout, "RECOVERY PHRASE", "Choose your recovery options")
+        options = _panel(layout)
         self.audit_details = QWidget()
         audit_layout = QVBoxLayout(self.audit_details)
         audit_layout.setContentsMargins(0, 0, 0, 0)
         audit_layout.setSpacing(10)
-        form = QFormLayout()
+        fields = QHBoxLayout()
+        fields.setSpacing(24)
+        length_column = QVBoxLayout()
+        length_column.setSpacing(10)
+        length_column.setAlignment(Qt.AlignmentFlag.AlignTop)
+        length_caption = _label("Recovery phrase")
+        length_caption.setObjectName("FieldLabel")
+        length_column.addWidget(length_caption)
+        self.word_count = ComboBox()
+        for count in (12, 15, 18, 21, 24):
+            self.word_count.addItem(f"{count} words", count)
+        length_caption.setBuddy(self.word_count)
+        length_column.addWidget(self.word_count)
+        fields.addLayout(length_column, 1)
+        dice_column = QVBoxLayout()
+        dice_column.setSpacing(10)
+        dice_caption = _label("Dice rolls · optional")
+        dice_caption.setObjectName("FieldLabel")
+        dice_column.addWidget(dice_caption)
         self.dice = QLineEdit()
-        self.dice.setPlaceholderText("Optional · enter rolls from 1 to 6")
-        form.addRow("Dice rolls", self.dice)
+        self.dice.setPlaceholderText("Enter rolls from 1 to 6")
+        dice_caption.setBuddy(self.dice)
+        dice_column.addWidget(self.dice)
         self.dice_count = _label("0 rolls entered", True)
         self.dice.textChanged.connect(lambda text: self.dice_count.setText(
             f"{sum(face in '123456' for face in text)} rolls entered"
         ))
-        form.addRow("", self.dice_count)
-        self.word_count = QComboBox()
-        for count in (12, 15, 18, 21, 24):
-            self.word_count.addItem(f"{count} words", count)
-        form.addRow("Recovery phrase", self.word_count)
-        layout.addLayout(form)
+        dice_column.addWidget(self.dice_count)
+        fields.addLayout(dice_column, 3)
+        options.addLayout(fields)
         audit_layout.addWidget(_label("Secret · verify on an offline computer only.", True))
         self.entropy_audit = QPlainTextEdit()
         self.entropy_audit.setReadOnly(True)
         self.entropy_audit.setMaximumHeight(250)
         audit_layout.addWidget(self.entropy_audit)
         self.audit_toggle = QPushButton("▸ Audit details")
+        self.audit_toggle.setObjectName("Quiet")
         self.audit_toggle.setCheckable(True)
         self.audit_toggle.setToolTip("Show the hashes, secret calculation and reproduction command.")
         self.audit_toggle.toggled.connect(self.audit_details.setVisible)
         self.audit_toggle.toggled.connect(lambda expanded: self.audit_toggle.setText(
             "▾ Audit details" if expanded else "▸ Audit details"
         ))
-        layout.addWidget(self.audit_toggle, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(self.audit_details)
+        options.addWidget(self.audit_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        options.addWidget(self.audit_details)
         self.audit_details.hide()
         self.dice.textChanged.connect(self._update_entropy_audit)
         self.word_count.currentIndexChanged.connect(self._update_entropy_audit)
@@ -313,28 +363,27 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_recovery_page(self):
-        layout = self._card(scroll=True)
-        title = _label("Recover from a BIP39 phrase", False)
-        title.setObjectName("Title")
-        layout.addWidget(title)
-        layout.addWidget(_label(
-            "Enter the full phrase, or leave the final word blank. The checksum can allow more than one final word; "
-            "choose the one written on your backup.", True
-        ))
-        self.recovery_count = QComboBox()
+        layout = self._card(scroll=True, surface=False)
+        _heading(layout, "WALLET RECOVERY", "Enter your recovery phrase", "Use the words from your existing backup, in order.")
+        recovery = _panel(layout)
+        self.recovery_count = ComboBox()
+        self.recovery_count.setAccessibleName("Recovery phrase length")
         for count in (12, 15, 18, 21, 24):
             self.recovery_count.addItem(f"{count} words", count)
-        layout.addWidget(self.recovery_count)
+        recovery.addWidget(self.recovery_count, 0, Qt.AlignmentFlag.AlignLeft)
         self.recovery_text = QPlainTextEdit()
         self.recovery_text.setPlaceholderText("Enter the words in order, separated by spaces")
-        self.recovery_text.setMaximumHeight(135)
-        layout.addWidget(self.recovery_text)
+        self.recovery_text.setFixedHeight(150)
+        self.recovery_text.setFont(fixed_font(12))
+        recovery.addWidget(self.recovery_text)
         self.recovery_text.textChanged.connect(self._clear_recovery_candidates)
         self.recovery_hint = _label("", True)
-        layout.addWidget(self.recovery_hint)
-        self.final_word = QComboBox()
+        recovery.addWidget(self.recovery_hint)
+        self.final_word = ComboBox()
         self.final_word.hide()
-        layout.addWidget(self.final_word)
+        recovery.addWidget(self.final_word)
+        hint = _label("Missing the last word? Continue to see valid choices, then choose the word on your backup.", True)
+        recovery.addWidget(hint)
         layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("Back")
@@ -406,52 +455,50 @@ class ColdSignerDialog(QDialog):
             self._show_protection()
 
     def _build_multisig_page(self):
-        card = QWidget()
-        card.setObjectName("Card")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(22, 20, 22, 20)
-        layout.setSpacing(12)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(card)
-        self.stack.addWidget(scroll)
-        title = _label("Multisig setup", False)
-        title.setObjectName("Title")
-        layout.addWidget(title)
-        layout.addWidget(_label(
-            "Share your public signer key, then add the other signers’ BIP87 keys.", True
-        ))
+        layout = self._card(scroll=True, surface=False)
+        _heading(layout, "MULTISIG POLICY", "Bring your signers together", "Share your public key, then add the other signers’ BIP87 keys.")
+        own_panel = _panel(layout, "Your signer")
         own_key_row = QHBoxLayout()
+        own_key_row.setSpacing(24)
         self.multisig_key_qr = QLabel()
         self.multisig_key_qr.setObjectName("QR")
         self.multisig_key_qr.setFixedSize(260, 260)
         self.multisig_key_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         own_key_row.addWidget(self.multisig_key_qr)
         own_key_fields = QVBoxLayout()
-        own_key_fields.addWidget(_label("Your public signer key"))
+        public_caption = _label("Public signer key")
+        public_caption.setObjectName("FieldLabel")
+        own_key_fields.addWidget(public_caption)
         self.multisig_own_key = QPlainTextEdit()
         self.multisig_own_key.setReadOnly(True)
-        self.multisig_own_key.setMaximumHeight(110)
+        self.multisig_own_key.setAccessibleName("Your public signer key")
+        self.multisig_own_key.setFixedHeight(130)
+        self.multisig_own_key.setFont(fixed_font(10))
         self.multisig_own_key.setToolTip("Share this public BIP87 key with the other signers. It contains no private key.")
         own_key_fields.addWidget(self.multisig_own_key)
         own_key_fields.addStretch()
         own_key_row.addLayout(own_key_fields, 1)
-        layout.addLayout(own_key_row)
+        own_panel.addLayout(own_key_row)
         self.threshold = QSpinBox()
+        self.threshold.setButtonSymbols(QSpinBox.ButtonSymbols.PlusMinus)
+        self.threshold.setMaximumWidth(160)
         self.threshold.setMinimum(1)
         self.threshold.setMaximum(3)
         self.threshold.setValue(2)
         self.signer_count_label = _label("3 signers total", True)
         self.own_signer_name = QLineEdit("This signer")
         form = QFormLayout()
+        form.setVerticalSpacing(12)
         form.addRow("This signer", self.own_signer_name)
         form.addRow("Required signatures", self.threshold)
         form.addRow("Signers", self.signer_count_label)
-        layout.addLayout(form)
+        own_panel.addLayout(form)
+        signers_panel = _panel(layout, "Other signers")
         self.signer_grid = QGridLayout()
+        self.signer_grid.setHorizontalSpacing(12)
+        self.signer_grid.setVerticalSpacing(12)
         self.signer_grid.setColumnStretch(2, 1)
-        layout.addLayout(self.signer_grid)
+        signers_panel.addLayout(self.signer_grid)
         self.signer_fields = []
         for index in range(2):
             self._add_signer_fields(f"Signer {index + 2}")
@@ -463,7 +510,7 @@ class ColdSignerDialog(QDialog):
         remove_signer.clicked.connect(self._remove_signer)
         signer_buttons.addWidget(remove_signer)
         signer_buttons.addStretch()
-        layout.addLayout(signer_buttons)
+        signers_panel.addLayout(signer_buttons)
         self.multisig_password = QLineEdit()
         self.multisig_password.setPlaceholderText("Wallet password to finish setup")
         self.multisig_password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -620,9 +667,11 @@ class ColdSignerDialog(QDialog):
         header.addWidget(generate)
         layout.addLayout(header)
         layout.addWidget(_label("Addresses generated or confirmed on this signer.", True))
-        self.address_table = QTableWidget(0, 3)
+        self.address_table = EmptyTable(0, 3, empty_title="No saved addresses", empty_hint="Generate an address or verify one from your online node.")
         self.address_table.setHorizontalHeaderLabels(["LABEL", "ADDRESS", "SAVED"])
         self.address_table.verticalHeader().hide()
+        self.address_table.verticalHeader().setDefaultSectionSize(48)
+        self.address_table.setAlternatingRowColors(True)
         self.address_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.address_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.address_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -630,7 +679,7 @@ class ColdSignerDialog(QDialog):
         self.address_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.address_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.address_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.address_table.cellDoubleClicked.connect(self._open_address_from_row)
+        self.address_table.cellActivated.connect(self._open_address_from_row)
         layout.addWidget(self.address_table, 1)
         layout.addWidget(_label("Double-click an address to view its QR code or edit its label.", True))
         self._add_back_button(layout, 6, "Back to wallet")
@@ -696,32 +745,47 @@ class ColdSignerDialog(QDialog):
         layout.addStretch()
 
     def _build_policy_page(self):
-        layout = self._card()
+        layout = self._card(scroll=True, surface=False)
         self._add_back_heading(layout, "Wallet policy", "Public wallet data supplied and checked by Bitcoin Core.", 12)
         self.policy_identity = _label("")
-        layout.addWidget(self.policy_identity)
-        self.signer_map = _label("")
-        self.signer_map.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.signer_map)
-        layout.addWidget(_label("PUBLIC DESCRIPTORS", False))
+        self.policy_identity.setObjectName("Value")
+        identity = _panel(layout, "Wallet identity")
+        identity.addWidget(self.policy_identity)
+        signers = _panel(layout, "Signers")
+        self.signer_map = QPlainTextEdit()
+        self.signer_map.setReadOnly(True)
+        self.signer_map.setAccessibleName("Wallet signers")
+        self.signer_map.setToolTip("The wallet’s signers and this signer’s public account key. Keep the complete public wallet policy for multisig recovery.")
+        self.signer_map.setFont(fixed_font(11))
+        self.signer_map.setFixedHeight(125)
+        signers.addWidget(self.signer_map)
+        descriptors = _panel(layout, "Public descriptors")
         self.descriptors = QPlainTextEdit()
         self.descriptors.setReadOnly(True)
-        self.descriptors.setMaximumHeight(250)
-        layout.addWidget(self.descriptors, 1)
+        self.descriptors.setAccessibleName("Public descriptors")
+        self.descriptors.setFont(fixed_font(11))
+        self.descriptors.setMinimumHeight(150)
+        descriptors.addWidget(self.descriptors)
 
     def _build_settings_page(self):
-        layout = self._card()
+        layout = self._card(surface=False)
         self._add_back_heading(layout, "Settings", "", 12)
+        appearance_panel = _panel(layout)
         appearance = QHBoxLayout()
-        appearance.addWidget(_label("Appearance", False))
+        heading = _label("Appearance")
+        heading.setObjectName("FormTitle")
+        appearance.addWidget(heading)
         appearance.addStretch()
         self.settings_theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         appearance.addWidget(self.settings_theme_button)
-        layout.addLayout(appearance)
-        layout.addWidget(_label("Cold signer session", False))
-        self.session_details = _label("Networking and swap are disabled for this session.", True)
-        layout.addWidget(self.session_details)
-        layout.addWidget(_label("The signing wallet is held in RAM by Bitcoin Core. Closing the session stops Core and removes its temporary wallet files.", True))
+        appearance_panel.addLayout(appearance)
+        session = _panel(layout, "Cold signer session")
+        self.session_details = _label(
+            "Swap and Core peer networking are disabled. Host networking stays on in development mode."
+            if self.dev_keep_network else "Networking and swap are disabled for this session.", True
+        )
+        session.addWidget(self.session_details)
+        session.addWidget(_label("Core holds this wallet in RAM. Closing the session removes its temporary files.", True))
         layout.addStretch()
 
     def _build_setup_page(self):
@@ -785,13 +849,11 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(footer)
 
     def _build_protection_page(self):
-        layout = self._card(scroll=True)
-        heading = _label("Wallet protection", False)
-        heading.setObjectName("Title")
-        layout.addWidget(heading)
-        protection = QGroupBox("Optional protection")
-        content = QVBoxLayout(protection)
-        content.setSpacing(8)
+        layout = self._card(scroll=True, surface=False)
+        _heading(layout, "OPTIONAL PROTECTION", "Protect your wallet")
+        columns = QHBoxLayout()
+        columns.setSpacing(20)
+        content = _panel(columns, "Recovery protection", "A BIP39 passphrase creates a different wallet.")
         self.use_bip39_passphrase = QCheckBox("Use a BIP39 passphrase")
         self.use_bip39_passphrase.setToolTip("An additional secret that creates a different wallet from the same recovery phrase.")
         content.addWidget(self.use_bip39_passphrase)
@@ -809,6 +871,8 @@ class ColdSignerDialog(QDialog):
         self.bip39_show.toggled.connect(self._toggle_bip39_visibility)
         self._toggle_bip39_fields(False)
 
+        content.addStretch()
+        content = _panel(columns, "Session protection", "A password encrypts this session’s temporary wallet file.")
         self.encrypt_wallet = QCheckBox("Encrypt wallet")
         self.encrypt_wallet.setToolTip("Encrypt the temporary Bitcoin Core wallet file for this session.")
         content.addWidget(self.encrypt_wallet)
@@ -825,7 +889,8 @@ class ColdSignerDialog(QDialog):
         self.encrypt_wallet.toggled.connect(self._toggle_wallet_fields)
         self.wallet_show.toggled.connect(self._toggle_wallet_visibility)
         self._toggle_wallet_fields(False)
-        layout.addWidget(protection)
+        content.addStretch()
+        layout.addLayout(columns)
         layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("‹  Back")
@@ -894,10 +959,15 @@ class ColdSignerDialog(QDialog):
         layout.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
 
     def _add_back_heading(self, layout, title, description, target):
-        self._add_back_button(layout, target, "Back")
+        row = QHBoxLayout()
+        back = IconButton("back", "Back", lambda: self.stack.setCurrentIndex(target), tooltip="Return to the previous wallet screen.")
+        back.installEventFilter(self)
+        row.addWidget(back)
+        row.addSpacing(8)
         heading = _label(title, False)
-        heading.setObjectName("Title")
-        layout.addWidget(heading)
+        heading.setObjectName("CompactTitle")
+        row.addWidget(heading, 1)
+        layout.addLayout(row)
         if description:
             layout.addWidget(_label(description, True))
 
@@ -1208,42 +1278,45 @@ class ColdSignerDialog(QDialog):
         self.show_signer_password.setVisible(self.wallet_encrypted)
 
     def _build_verify_address_page(self):
-        layout = self._card()
-        title = _label("Verify a receive address", False)
-        title.setObjectName("Title")
-        layout.addWidget(title)
-        layout.addWidget(_label("Confirm this address belongs to the selected wallet.", True))
+        layout = self._card(surface=False)
+        self._add_back_heading(layout, "Verify a receiving address", "", 9)
+        address_panel = _panel(layout, "Receiving address")
         self.verify_address_input = QLineEdit()
         self.verify_address_input.setPlaceholderText("Bitcoin address or bitcoin: URI")
+        self.verify_address_input.setFont(fixed_font(11))
         self.verify_address_input.textChanged.connect(self._clear_address_result)
-        layout.addWidget(self.verify_address_input)
+        address_panel.addWidget(self.verify_address_input)
         controls = QHBoxLayout()
-        scan = QPushButton("Scan QR with zbarcam")
-        scan.clicked.connect(lambda: self._start_qr_scanner(self.verify_address_input))
+        scan = IconButton("scan", "Scan QR", lambda: self._start_qr_scanner(self.verify_address_input),
+                          tooltip="Use the camera to read a Bitcoin receiving address.")
         controls.addWidget(scan)
         verify = QPushButton("Verify address")
         verify.setObjectName("Primary")
         verify.clicked.connect(self._verify_receive_address)
         controls.addWidget(verify)
         controls.addStretch()
-        layout.addLayout(controls)
+        address_panel.addLayout(controls)
         self.verify_result = _label("")
         self.verify_result.setObjectName("Verification")
+        self.verify_result.setMinimumHeight(56)
+        self.verify_result.hide()
         layout.addWidget(self.verify_result)
+        label_panel = _panel(layout, "Label", "Optional · saved with this address on the signer.")
         self.verified_address_label = QLineEdit()
         self.verified_address_label.setPlaceholderText("Label · optional")
         self.verified_address_label.setEnabled(False)
-        layout.addWidget(self.verified_address_label)
+        label_panel.addWidget(self.verified_address_label)
         layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("Back to wallet")
         back.clicked.connect(lambda: self.stack.setCurrentIndex(9))
         footer.addWidget(back)
         footer.addStretch()
-        done = QPushButton("Done")
-        done.setObjectName("Primary")
-        done.clicked.connect(self._save_verified_address)
-        footer.addWidget(done)
+        self.verify_done = QPushButton("Done")
+        self.verify_done.setObjectName("Primary")
+        self.verify_done.setEnabled(False)
+        self.verify_done.clicked.connect(self._save_verified_address)
+        footer.addWidget(self.verify_done)
         layout.addLayout(footer)
 
     def _toggle_bip39_fields(self, enabled):
@@ -1658,7 +1731,7 @@ class ColdSignerDialog(QDialog):
             signer_text = "Single-signature · one signer"
         if own_key:
             signer_text += "\n\nYour BIP87 account key\n" + own_key
-        self.signer_map.setText(signer_text)
+        self.signer_map.setPlainText(signer_text)
         self.wallet_type_summary = wallet_type
         self.stack.setCurrentIndex(6)
 
@@ -1691,6 +1764,16 @@ class ColdSignerDialog(QDialog):
         elif event.type() == QEvent.Type.Leave and self.help_mode:
             QToolTip.hideText()
         return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        # Enter activates the focused button, never an unrelated dialog default.
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            focused = self.focusWidget()
+            if isinstance(focused, QPushButton) and focused.isEnabled() and not event.isAutoRepeat():
+                focused.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _open_addresses(self):
         self._refresh_address_table()
@@ -1884,6 +1967,8 @@ class ColdSignerDialog(QDialog):
             belongs = self.core.verify_address(address)
         except ColdSetupError as exc:
             self.verify_result.setText(str(exc))
+            self.verify_result.show()
+            self.verify_done.setEnabled(False)
             self.verify_result.setProperty("verified", False)
             self.verify_result.style().unpolish(self.verify_result)
             self.verify_result.style().polish(self.verify_result)
@@ -1894,15 +1979,21 @@ class ColdSignerDialog(QDialog):
             self.verify_result.setText(f"Address belongs to {self.wallet_display_name}.")
             self.verify_result.setProperty("verified", True)
             self.verified_address_label.setEnabled(True)
+            self.verify_done.setEnabled(True)
         else:
             self.verify_result.setText("This address does not belong to the current wallet.")
             self.verify_result.setProperty("verified", False)
             self.verified_address_label.setEnabled(False)
+            self.verify_done.setEnabled(False)
+        self.verify_result.show()
         self.verify_result.style().unpolish(self.verify_result)
         self.verify_result.style().polish(self.verify_result)
+        self.verify_result.updateGeometry()
 
     def _clear_address_result(self):
         self.verify_result.clear()
+        self.verify_result.hide()
+        self.verify_done.setEnabled(False)
         self.verify_result.setProperty("verified", False)
         self.verified_address_label.clear()
         self.verified_address_label.setEnabled(False)
@@ -2009,26 +2100,29 @@ class ColdSignerDialog(QDialog):
         except (ValueError, DataOverflowError):
             pixmap = None
         if not hasattr(self, "export_qr"):
-            layout = self._card(scroll=True)
-            title = _label("Export watch-only wallet")
-            title.setObjectName("Title")
-            layout.addWidget(title)
+            layout = self._card(scroll=True, surface=False)
+            self._add_back_heading(layout, "Export watch-only wallet", "Scan this public wallet with your online node.", 12)
+            content = QHBoxLayout()
+            content.setSpacing(24)
             self.export_qr = QLabel()
+            self.export_qr.setObjectName("QR")
+            self.export_qr.setFixedSize(480, 480)
             self.export_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.export_qr.setWordWrap(True)
-            layout.addWidget(self.export_qr)
+            content.addWidget(self.export_qr, 0, Qt.AlignmentFlag.AlignTop)
+            data_panel = _panel(content, "Public wallet backup", "Includes the wallet name and public descriptors. Keep it with your multisig backups.")
             self.export_text = QPlainTextEdit()
             self.export_text.setReadOnly(True)
-            self.export_text.setMaximumHeight(110)
+            self.export_text.setFont(fixed_font(10))
+            self.export_text.setMinimumHeight(180)
             self.export_text.setToolTip("Public wallet name and receive/change descriptors. Keep this backup for multisig recovery.")
             self.export_text.installEventFilter(self)
-            layout.addWidget(self.export_text)
+            data_panel.addWidget(self.export_text, 1)
+            note = _label("Contains no recovery phrase or private keys.", True)
+            data_panel.addWidget(note)
+            layout.addLayout(content)
+            layout.addStretch()
             footer = QHBoxLayout()
-            back = QPushButton("Back")
-            back.setToolTip("Return to Tools & Settings. The public wallet backup remains available here.")
-            back.installEventFilter(self)
-            back.clicked.connect(lambda: self.stack.setCurrentIndex(12))
-            footer.addWidget(back)
             footer.addStretch()
             save = QPushButton("Save wallet backup…")
             save.setObjectName("Primary")

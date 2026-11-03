@@ -18,7 +18,8 @@ from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
-    QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip, QScrollArea)
+    QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip, QScrollArea,
+    QStackedWidget, QSizePolicy)
 from PySide6.QtWidgets import QMessageBox
 from .qr import qr_pixmap
 from .scanner import QRScanner
@@ -26,7 +27,7 @@ from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession, _system_tool
 from .theme import stylesheet
-from .widgets import ActionRow, ChoiceRow, IconButton, LineIcon, ScanIllustration, fixed_font
+from .widgets import ActionRow, ChoiceRow, ComboBox, EmptyTable, IconButton, LineIcon, ScanIllustration, fixed_font
 from . import DEVELOPMENT_BUILD, __version__
 
 MANAGED_RPC_PORT = 8332
@@ -41,6 +42,7 @@ def label(text, name=None):
 
 def button(text, action, primary=False):
     widget = QPushButton(text)
+    widget.setAutoDefault(False)
     if primary:
         widget.setObjectName("Primary")
     widget.clicked.connect(action)
@@ -130,6 +132,7 @@ class App(QMainWindow):
         self._set_core_status("Looking for Bitcoin Core…")
     def _menus(self):
         menu = self.menuBar().addMenu("Wallet")
+        self.wallet_menu = menu
         for text, callback in [
             ("Welcome", lambda: self.tabs.setCurrentIndex(0)),
             ("Choose wallet mode", lambda: self.tabs.setCurrentIndex(1)),
@@ -142,6 +145,7 @@ class App(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(callback)
             menu.addAction(action)
+        self.menuBar().hide()
 
     def _layout(self):
         central = QWidget()
@@ -170,6 +174,11 @@ class App(QMainWindow):
         self.theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         toolbar.addWidget(self.theme_button)
         toolbar.addWidget(IconButton("node", "Connection", self.show_connection))
+        menu_button = QPushButton("&Wallet")
+        menu_button.setObjectName("ToolbarButton")
+        menu_button.setMenu(self.wallet_menu)
+        menu_button.setToolTip("Open wallet navigation, connection options, and application information.")
+        toolbar.addWidget(menu_button)
         root.addLayout(toolbar)
         divider = QFrame()
         divider.setObjectName("HeaderDivider")
@@ -277,11 +286,15 @@ class App(QMainWindow):
         self.tabs.addTab(page, "Welcome")
 
     def _set_core_status(self, text, state="idle"):
-        self.core_status.setText(text)
-        self.core_status.setProperty("state", state)
-        self.core_status.style().unpolish(self.core_status)
-        self.core_status.style().polish(self.core_status)
-        self.core_status.update()
+        fields = [self.core_status]
+        if hasattr(self, "connection_status"):
+            fields.append(self.connection_status)
+        for field in fields:
+            field.setText(text)
+            field.setProperty("state", state)
+            field.style().unpolish(field)
+            field.style().polish(field)
+            field.update()
 
     def _mode_page(self):
         page, layout = page_layout(36, 24, "OnboardingPage")
@@ -360,13 +373,12 @@ class App(QMainWindow):
         title_row = QHBoxLayout()
         title_copy = QVBoxLayout()
         title_copy.setSpacing(6)
-        title_copy.addWidget(label("ONLINE NODE", "SectionLabel"))
         self.online_name = label("Your online node", "Title")
         self.online_name.setWordWrap(True)
         title_copy.addWidget(self.online_name)
         title_row.addLayout(title_copy, 1)
         title_row.addStretch()
-        self.wallet_picker = QComboBox()
+        self.wallet_picker = ComboBox()
         self.wallet_picker.setMinimumWidth(210)
         self.wallet_picker.currentTextChanged.connect(self.select_wallet)
         title_row.addWidget(self.wallet_picker)
@@ -478,7 +490,7 @@ class App(QMainWindow):
         self.recent.setObjectName("EmbeddedTable")
         self.recent.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.recent.setMinimumHeight(150)
-        self.recent.cellDoubleClicked.connect(self.transaction_details)
+        self.recent.cellActivated.connect(self.transaction_details)
         activity.addWidget(self.recent, 1)
         layout.addWidget(activity_card, 1)
         viewport = QScrollArea()
@@ -526,10 +538,13 @@ class App(QMainWindow):
 
     def _toggle_help_mode(self):
         self.help_mode = not self.help_mode
-        self.help_button.set_caption("Help on" if self.help_mode else "Help")
-        self.help_button.setProperty("active", self.help_mode)
-        self.help_button.style().unpolish(self.help_button)
-        self.help_button.style().polish(self.help_button)
+        controls = [self.help_button] + [control for control in self.findChildren(IconButton)
+                                       if control.property("helpToggle")]
+        for control in controls:
+            control.set_caption("Help on" if self.help_mode else "Help")
+            control.setProperty("active", self.help_mode)
+            control.style().unpolish(control)
+            control.style().polish(control)
 
     def _toggle_theme(self):
         self.dark_mode = not self.dark_mode
@@ -608,7 +623,7 @@ class App(QMainWindow):
         return super().eventFilter(watched, event)
 
     def page(self, title, *, scroll=False):
-        widget, layout = page_layout(18, 16)
+        widget, layout = page_layout(22, 16, "OnlinePage")
         if scroll:
             viewport = QScrollArea()
             viewport.setWidgetResizable(True)
@@ -620,17 +635,61 @@ class App(QMainWindow):
         return layout
 
     def _wallet_page_heading(self, layout, title, description=""):
-        back = button("‹  Back to wallet", lambda: self.tabs.setCurrentIndex(2))
-        back.setObjectName("Quiet")
-        layout.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(label(title, "Title"))
+        row = QHBoxLayout()
+        row.addWidget(label(title, "Title"), 1)
+        row.addWidget(IconButton("back", "Back to wallet", lambda: self.tabs.setCurrentIndex(2),
+                                 tooltip="Return to the wallet overview."))
+        layout.addLayout(row)
         if description:
             detail = label(description, "PageDescription")
             detail.setWordWrap(True)
             layout.addWidget(detail)
 
+    def _dialog(self, title, description="", *, size=(800, 540), online=False):
+        dialog = QDialog(self)
+        dialog.setObjectName("OnlineDialog" if online else "CompanionDialog")
+        dialog.setWindowTitle(f"{title} · Core Companion")
+        dialog.resize(*size)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(20)
+        heading = QHBoxLayout()
+        copy = QVBoxLayout()
+        copy.setSpacing(8)
+        copy.addWidget(label(title, "CompactTitle"))
+        if description:
+            detail = label(description, "FormHint")
+            detail.setWordWrap(True)
+            copy.addWidget(detail)
+        heading.addLayout(copy, 1)
+        help_button = IconButton("help", "Help on" if self.help_mode else "Help", self._toggle_help_mode,
+                                 tooltip="Turn on instant explanations when hovering over a control.")
+        help_button.setProperty("helpToggle", True)
+        help_button.setProperty("active", self.help_mode)
+        help_button.installEventFilter(self)
+        heading.addWidget(help_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(heading)
+        return dialog, layout
+
+    def _dialog_help(self, dialog):
+        descriptions = {
+            "Close": "Close this window.",
+            "Back": "Close this form without applying changes.",
+            "Connect": "Connect to Bitcoin Core on this computer using the selected port.",
+            "Disconnect": "Disconnect this interface. The Bitcoin Core node keeps running.",
+            "Core details": "Show the complete response supplied by Bitcoin Core.",
+        }
+        for control in dialog.findChildren(QWidget):
+            if isinstance(control, (QPushButton, QLineEdit, QPlainTextEdit, QComboBox)):
+                if not control.toolTip():
+                    control.setToolTip(descriptions.get(control.text(), "Activate this control.")
+                                       if isinstance(control, QPushButton) else "Complete information supplied by Bitcoin Core.")
+                control.installEventFilter(self)
+
     def table(self, headers):
-        table = QTableWidget(0, len(headers))
+        is_addresses = "ADDRESS" in headers
+        table = EmptyTable(0, len(headers), empty_title="No saved addresses" if is_addresses else "No activity yet",
+                           empty_hint="Generate an address to see it here." if is_addresses else "Wallet transactions will appear here.")
         table.setHorizontalHeaderLabels(headers)
         table.verticalHeader().hide()
         table.verticalHeader().setDefaultSectionSize(48)
@@ -662,7 +721,7 @@ class App(QMainWindow):
         for col, width in [(0, 155), (1, 175), (3, 180)]:
             self.transactions.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
             self.transactions.setColumnWidth(col, width)
-        self.transactions.cellDoubleClicked.connect(self.transaction_details)
+        self.transactions.cellActivated.connect(self.transaction_details)
         page.addWidget(self.transactions, 1)
         bar = QHBoxLayout()
         self.page_label = label("No activity loaded", "Muted")
@@ -677,22 +736,42 @@ class App(QMainWindow):
         page = self.page("Receive", scroll=True)
         self._wallet_page_heading(page, "Receive Bitcoin")
         card = QFrame()
-        card.setObjectName("Surface")
+        card.setObjectName("FormPanel")
         card.setMinimumHeight(378)
         form = QVBoxLayout(card)
         form.setContentsMargins(28, 28, 28, 28)
         form.setSpacing(20)
         receive_content = QHBoxLayout()
         receive_content.setSpacing(32)
+        self.receive_visual = QStackedWidget()
+        self.receive_visual.setFixedSize(320, 320)
+        empty = QFrame()
+        empty.setObjectName("SubtlePanel")
+        empty_layout = QVBoxLayout(empty)
+        empty_layout.setContentsMargins(24, 24, 24, 24)
+        empty_layout.setSpacing(14)
+        empty_layout.addStretch()
+        icon = LineIcon("receive", "BlueIcon", stroke_width=1.7, inset=14)
+        icon.setFixedSize(64, 64)
+        empty_layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_title = label("A new address", "EmptyTitle")
+        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_title)
+        empty_hint = label("Generate an address to show its QR code.", "EmptyHint")
+        empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_hint.setWordWrap(True)
+        empty_layout.addWidget(empty_hint)
+        empty_layout.addStretch()
+        self.receive_visual.addWidget(empty)
         self.receive_qr = QLabel()
         self.receive_qr.setObjectName("QR")
         self.receive_qr.setFixedSize(320, 320)
         self.receive_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.receive_qr.setText("Your address QR\nwill appear here")
-        receive_content.addWidget(self.receive_qr, 0, Qt.AlignmentFlag.AlignTop)
+        self.receive_visual.addWidget(self.receive_qr)
+        receive_content.addWidget(self.receive_visual, 0, Qt.AlignmentFlag.AlignTop)
         address_column = QVBoxLayout()
         address_column.setSpacing(12)
-        address_column.addWidget(label("LABEL · OPTIONAL", "SectionLabel"))
+        address_column.addWidget(label("Label · optional", "FieldLabel"))
         self.receive_label = QLineEdit()
         self.receive_label.setPlaceholderText("e.g. Savings")
         address_column.addWidget(self.receive_label)
@@ -701,20 +780,26 @@ class App(QMainWindow):
         row.addWidget(self.generate_button)
         row.addStretch()
         address_column.addLayout(row)
-        address_column.addSpacing(12)
-        address_column.addWidget(label("RECEIVING ADDRESS", "SectionLabel"))
+        self.receive_details = QWidget()
+        details = QVBoxLayout(self.receive_details)
+        details.setContentsMargins(0, 12, 0, 0)
+        details.setSpacing(12)
+        self.receive_used = label("Address saved in your wallet", "InlineNotice")
+        self.receive_used.setProperty("tone", "success")
+        details.addWidget(self.receive_used)
+        details.addWidget(label("Receiving address", "FieldLabel"))
         self.address = QLineEdit()
         self.address.setReadOnly(True)
         self.address.setPlaceholderText("Your receiving address will appear here")
         self.address.setFont(fixed_font(11))
-        address_column.addWidget(self.address)
-        self.receive_used = label("Saved in your wallet", "Muted")
-        self.receive_used.hide()
-        address_column.addWidget(self.receive_used)
+        details.addWidget(self.address)
         row = QHBoxLayout()
-        row.addWidget(button("Copy address", self.copy_address))
+        row.addWidget(IconButton("copy", "Copy address", self.copy_address,
+                                 tooltip="Copy the complete receiving address. Verify the pasted address on your cold signer."))
         row.addStretch()
-        address_column.addLayout(row)
+        details.addLayout(row)
+        self.receive_details.hide()
+        address_column.addWidget(self.receive_details)
         address_column.addStretch()
         receive_content.addLayout(address_column, 1)
         form.addLayout(receive_content)
@@ -743,7 +828,7 @@ class App(QMainWindow):
         for column, width in [(0, 170), (2, 175)]:
             self.addresses.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self.addresses.setColumnWidth(column, width)
-        self.addresses.cellDoubleClicked.connect(self.address_details)
+        self.addresses.cellActivated.connect(self.address_details)
         page.addWidget(self.addresses, 1)
         page.addWidget(label("Received amounts are lifetime totals. Change addresses are omitted.", "FooterNote"))
 
@@ -794,33 +879,35 @@ class App(QMainWindow):
         page.addStretch()
 
     def _connection_dialog(self):
-        self.connection = QDialog(self)
-        self.connection.setWindowTitle("Advanced connection · Core Companion")
-        self.connection.setMinimumWidth(580)
-        layout = QVBoxLayout(self.connection)
-        layout.setContentsMargins(24, 24, 24, 22)
-        layout.setSpacing(12)
-        layout.addWidget(label("Advanced connection", "Heading"))
-        layout.addWidget(label(
-            "Use these options only if automatic local detection does not work.", "Muted",
-        ))
+        self.connection, layout = self._dialog("Local connection", "Bitcoin Core on this computer.", size=(620, 410))
+        panel = QFrame()
+        panel.setObjectName("FormPanel")
+        content = QVBoxLayout(panel)
+        content.setContentsMargins(22, 20, 22, 20)
+        content.setSpacing(16)
+        self.connection_status = label(self.core_status.text(), "CoreStatus")
+        self.connection_status.setWordWrap(True)
+        content.addWidget(self.connection_status)
         form = QFormLayout()
         form.setSpacing(12)
         self.port = QLineEdit("8332")
+        self.port.setToolTip("The local Bitcoin Core RPC port. Connections always use 127.0.0.1.")
         form.addRow("Core port", self.port)
-        layout.addLayout(form)
+        content.addLayout(form)
         note = label(
-            "Companion finds Core's local connection automatically. Keep Core running on this computer "
-            "with local RPC enabled. Only loaded watch-only wallets appear.",
-            "Muted",
+            "Local authentication is automatic. Change the port only if Core uses a different one.", "FormHint",
         )
         note.setWordWrap(True)
-        layout.addWidget(note)
+        content.addWidget(note)
+        layout.addWidget(panel)
+        layout.addStretch()
         row = QHBoxLayout()
         row.addWidget(button("Disconnect", self.disconnect))
         row.addStretch()
+        row.addWidget(button("Close", self.connection.hide))
         row.addWidget(button("Connect", self.connect, True))
         layout.addLayout(row)
+        self._dialog_help(self.connection)
 
     def show_connection(self):
         if self.tabs.currentIndex() not in (0, 1):
@@ -840,31 +927,31 @@ class App(QMainWindow):
         if self.service is None:
             self.statusBar().showMessage("Connect to your online node first.")
             return
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Import watch-only wallet")
-        dialog.resize(760, 540)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(28, 28, 28, 28)
-        layout.setSpacing(16)
-        layout.addWidget(label("Import your wallet", "Title"))
-        layout.addWidget(label("Scan the public wallet exported by your cold signer.", "PageDescription"))
-        layout.addWidget(label("WALLET NAME", "SectionLabel"))
+        dialog, layout = self._dialog("Import your wallet", "Scan the public wallet exported by your cold signer.", size=(800, 560), online=True)
+        panel = QFrame()
+        panel.setObjectName("FormPanel")
+        fields = QVBoxLayout(panel)
+        fields.setContentsMargins(22, 20, 22, 20)
+        fields.setSpacing(14)
+        fields.addWidget(label("Wallet name", "FieldLabel"))
         name = QLineEdit()
         name.setPlaceholderText("Wallet name")
         name.setToolTip("A name for the new watch-only wallet stored by Core on this computer.")
         name.installEventFilter(self)
-        layout.addWidget(name)
-        layout.addWidget(label("PUBLIC WALLET", "SectionLabel"))
+        fields.addWidget(name)
+        fields.addWidget(label("Public wallet", "FieldLabel"))
         payload = QPlainTextEdit()
         payload.setPlaceholderText("Scan the cold signer’s public wallet QR, or paste public descriptors")
+        payload.setFont(fixed_font(10))
         payload.setToolTip("Public descriptors define the wallet’s addresses. Never paste recovery words or private keys here.")
         payload.installEventFilter(self)
-        layout.addWidget(payload, 1)
+        fields.addWidget(payload, 1)
         scanner = QRScanner(dialog)
         scan = button("Scan QR", scanner.scan)
         scan.setToolTip("Open the camera to scan the public wallet exported by your cold signer.")
         scan.installEventFilter(self)
-        layout.addWidget(scan)
+        fields.addWidget(scan, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(panel, 1)
 
         def read_scan(text):
             payload.setPlainText(text)
@@ -910,6 +997,7 @@ class App(QMainWindow):
         proceed.installEventFilter(self)
         footer.addWidget(proceed)
         layout.addLayout(footer)
+        self._dialog_help(dialog)
         dialog.exec()
         scanner.stop()
 
@@ -1410,15 +1498,8 @@ class App(QMainWindow):
         self.sync_detail.setText("Local Bitcoin Core")
         self.sync_progress.setValue(0)
         self._set_core_status("Bitcoin Core not connected", "error")
-        self.address.clear()
-        self.receive_qr.clear()
-        self.receive_qr.setText("Your address QR\nwill appear here")
         self.psbt.clear()
-        self.receive_label.clear()
-        self.receive_label.setReadOnly(False)
-        self.receive_done.hide()
-        self.receive_used.hide()
-        self.generate_button.show()
+        self._reset_receive()
         self.transactions.setRowCount(0)
         self.recent.setRowCount(0)
         self.addresses.setRowCount(0)
@@ -1525,14 +1606,7 @@ class App(QMainWindow):
         if not name or self.busy:
             return
         self.setWindowTitle(f"Core Companion — {name}")
-        self.address.clear()
-        self.receive_qr.clear()
-        self.receive_qr.setText("Your address QR\nwill appear here")
-        self.receive_label.clear()
-        self.receive_label.setReadOnly(False)
-        self.receive_done.hide()
-        self.receive_used.hide()
-        self.generate_button.show()
+        self._reset_receive()
         self.skip = 0
         self.transactions.setRowCount(0)
         self.recent.setRowCount(0)
@@ -1610,6 +1684,9 @@ class App(QMainWindow):
         query = self.search.text().casefold()
         for row, tx in enumerate(self.rows):
             self.transactions.setRowHidden(row, query not in json.dumps(tx, default=str).casefold())
+        self.transactions.set_empty_message("No matching activity" if query else "No activity yet",
+                                            "Try a different search." if query else "Wallet transactions will appear here.")
+        self.transactions.update_empty_state()
 
     def paginate(self, delta):
         if not self.busy and self.service:
@@ -1623,20 +1700,26 @@ class App(QMainWindow):
         service, name, text = self.service, self.wallet_picker.currentText(), self.receive_label.text()
         self.task("Requesting an address from Core…", lambda: service.receive(name, text), self.received)
 
-    def _open_receive(self):
+    def _reset_receive(self):
         self.address.clear()
         self.receive_qr.clear()
-        self.receive_qr.setText("Your address QR\nwill appear here")
+        self.receive_visual.setCurrentIndex(0)
+        self.receive_details.hide()
         self.receive_label.clear()
         self.receive_label.setReadOnly(False)
         self.receive_used.hide()
         self.receive_done.hide()
         self.generate_button.show()
+
+    def _open_receive(self):
+        self._reset_receive()
         self.tabs.setCurrentIndex(4)
 
     def received(self, result):
         self.address.setText(result[0])
         self.receive_qr.setPixmap(self._qr_pixmap(result[0], size=320))
+        self.receive_visual.setCurrentIndex(1)
+        self.receive_details.show()
         self.receive_used.show()
         self.receive_label.setReadOnly(True)
         self.receive_done.show()

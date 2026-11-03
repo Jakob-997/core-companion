@@ -3,12 +3,14 @@
 from PySide6.QtCore import QByteArray, Qt, QRectF, QSize, Signal
 from PySide6.QtGui import QColor, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QTableWidget, QVBoxLayout, QWidget
 
 
 _ICONS = {
+    "menu": '<path d="M4 6h16M4 12h16M4 18h16"/>',
     "back": '<path d="m14 6-6 6 6 6"/>',
     "chevron-right": '<path d="m9 6 6 6-6 6"/>',
+    "chevron-down": '<path d="m6 9 6 6 6-6"/>',
     "arrow-right": '<path d="M4 12h15m-6-6 6 6-6 6"/>',
     "check": '<path d="m5 12 4 4L19 6"/>',
     "lock": '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4m-4 4v3"/>',
@@ -55,6 +57,52 @@ def fixed_font(size):
     return font
 
 
+class EmptyTable(QTableWidget):
+    """A regular table with a quiet message when there are no visible rows."""
+
+    def __init__(self, rows=0, columns=0, parent=None, *, empty_title="No entries yet", empty_hint=""):
+        super().__init__(rows, columns, parent)
+        self._empty = QWidget(self.viewport())
+        self._empty.setObjectName("TableEmptyState")
+        self._empty.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        content = QVBoxLayout(self._empty)
+        content.setContentsMargins(20, 20, 20, 20)
+        content.setSpacing(8)
+        content.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = self._empty_title = QLabel(empty_title)
+        title.setObjectName("Heading")
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        content.addWidget(title)
+        hint = self._empty_hint = QLabel(empty_hint)
+        hint.setObjectName("EmptyHint")
+        hint.setTextFormat(Qt.TextFormat.PlainText)
+        hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setVisible(bool(empty_hint))
+        content.addWidget(hint)
+        self.model().rowsInserted.connect(self.update_empty_state)
+        self.model().rowsRemoved.connect(self.update_empty_state)
+        self.model().modelReset.connect(self.update_empty_state)
+        self.update_empty_state()
+
+    def set_empty_message(self, title, hint=""):
+        self._empty_title.setText(title)
+        self._empty_hint.setText(hint)
+        self._empty_hint.setVisible(bool(hint))
+        self._empty.updateGeometry()
+
+    def update_empty_state(self, *_args):
+        self._empty.setVisible(not any(not self.isRowHidden(row) for row in range(self.rowCount())))
+        self._empty.setGeometry(self.viewport().rect())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_empty"):
+            self._empty.setGeometry(self.viewport().rect())
+
+
 class LineIcon(QLabel):
     def __init__(self, glyph, object_name, stroke_width=2.05, inset=7):
         super().__init__()
@@ -89,6 +137,22 @@ class LineIcon(QLabel):
         )
         renderer.render(painter, bounds)
         painter.end()
+
+
+class ComboBox(QComboBox):
+    """A native selector with a visible, theme-aware dropdown indicator."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._chevron = LineIcon("chevron-down", "ToolbarIcon", inset=0, stroke_width=1.7)
+        self._chevron.setParent(self)
+        self._chevron.setGeometry(max(0, self.width() - 29), (self.height() - 16) // 2, 16, 16)
+        self._chevron.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_chevron"):
+            self._chevron.setGeometry(max(0, self.width() - 29), (self.height() - 16) // 2, 16, 16)
 
 
 class FingerprintMark(QWidget):
@@ -287,7 +351,23 @@ class ActionRow(QFrame):
         super().focusOutEvent(event)
 
 
-class ChoiceRow(QPushButton):
+class _Button(QPushButton):
+    """Explicit keyboard activation without becoming a dialog's implicit action."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setAutoDefault(False)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if not event.isAutoRepeat():
+                self.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class ChoiceRow(_Button):
     """Compact selectable row matching the wallet mode and setup screens."""
 
     def __init__(self, symbol, title, description="", *, accent="green", tooltip="", card=False):
@@ -356,7 +436,7 @@ class ChoiceRow(QPushButton):
         self.radio.update()
 
 
-class IconButton(QPushButton):
+class IconButton(_Button):
     """Small icon-and-label button for the desktop header."""
 
     def __init__(self, glyph, text, callback, *, tooltip=""):
