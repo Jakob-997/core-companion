@@ -1,0 +1,23 @@
+[Unit]
+Description=Core Companion permanent offline policy
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target network.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/core-companion-airgap
+TimeoutStartSec=15
+UMask=0022
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=sysinit.target

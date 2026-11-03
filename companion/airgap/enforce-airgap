@@ -1,0 +1,21 @@
+#!/bin/sh
+# Installed root-owned. Never invokes code from the user's application folder.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+/usr/sbin/nft -f /etc/core-companion/airgap.nft
+/usr/sbin/rfkill block all
+for link in /sys/class/net/*; do
+    name=$(/usr/bin/basename "$link")
+    if [ "$name" != lo ]; then
+        /usr/sbin/ip link set dev "$name" down
+    fi
+done
+# Publish a fresh root-owned success record only after every operation succeeds.
+/usr/bin/install -d -o root -g root -m 0755 /run/core-companion-airgap
+read -r boot_id < /proc/sys/kernel/random/boot_id
+read -r uptime ignored < /proc/uptime
+printf '%s\n%s\n' "$boot_id" "$uptime" > /run/core-companion-airgap/status.tmp
+/usr/bin/chmod 0644 /run/core-companion-airgap/status.tmp
+/usr/bin/mv -f /run/core-companion-airgap/status.tmp /run/core-companion-airgap/status

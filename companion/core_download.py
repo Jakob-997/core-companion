@@ -15,8 +15,11 @@ from pathlib import Path, PurePosixPath
 
 if __package__:
     from .linux_cold import SYSTEM_PATH, _system_tool
+    from .permanent_airgap import PermanentAirgap
 else:
     from linux_cold import SYSTEM_PATH, _system_tool
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from companion.permanent_airgap import PermanentAirgap
 
 
 DOWNLOAD_PAGE = "https://bitcoincore.org/en/download/"
@@ -244,6 +247,8 @@ def _extract_verified_archive(archive, version, install_root):
 
 
 def download_and_verify():
+    if PermanentAirgap.is_committed():
+        raise CoreDownloadError("Downloads are forbidden on a permanently offline computer. Use verified offline media.")
     global active_verifier
     if not _system_tool("gpg") or not _system_tool("wget"):
         raise CoreDownloadError("Install GPG and wget, then try again.")

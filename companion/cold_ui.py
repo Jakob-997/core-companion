@@ -195,7 +195,7 @@ class ColdSignerDialog(QDialog):
         self._build_setup_page()
         self._build_type_page()
         self._build_protection_page()
-        self.status_left = _label("Cold signer · offline", True)
+        self.status_left = _label("TEST VM · NOT AIR-GAPPED" if self.dev_keep_network else "Permanent offline signer", True)
         self.status_right = _label("Setup", True)
         self.status_left.setWordWrap(False)
         self.status_right.setWordWrap(False)
@@ -814,9 +814,12 @@ class ColdSignerDialog(QDialog):
         session = _panel(layout, "Cold signer mode enabled")
         self.session_details = _label(
             "Swap and Core peer networking are disabled. Host networking stays on in development mode."
-            if self.dev_keep_network else "Networking and swap are disabled for this session.", True
+            if self.dev_keep_network else "Permanent offline policy is enforced across sessions and reboots. Swap is disabled while signing.", True
         )
         session.addWidget(self.session_details)
+        warning = _label("Never take a real-wallet computer back online. For the strongest safeguard, remove Wi-Fi, Ethernet, Bluetooth and other networking hardware.")
+        warning.setObjectName("InfoStrip")
+        session.addWidget(warning)
         advanced = QCheckBox("Enable BIP39 passphrases (advanced)")
         advanced.setToolTip("Adds an optional BIP39 passphrase to setup and recovery. Each passphrase creates a different wallet; wallet-file encryption is separate.")
         advanced.setChecked(QSettings("CoreCompanion", "CoreCompanion").value("bip39_enabled", False, type=bool))

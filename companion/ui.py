@@ -30,6 +30,7 @@ from .scanner import QRScanner
 from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession, _system_tool
+from .permanent_airgap import PermanentAirgap
 from .theme import stylesheet
 from .widgets import ActionRow, ChoiceRow, ComboBox, EmptyTable, IconButton, LineIcon, ScanIllustration, fixed_font
 from . import DEVELOPMENT_BUILD, __version__
@@ -107,6 +108,8 @@ class App(QMainWindow):
         self.cold_temp_path = None
         self.cold_restoring = False
         self.dev_keep_network = bool(dev_keep_network)
+        self.permanent_cold = PermanentAirgap.is_committed()
+        self.cold_required = self.permanent_cold or (not self.dev_keep_network and PermanentAirgap.saved_wallets_exist())
         self.isolation_timer = QTimer(self)
         self.isolation_timer.setInterval(2000)
         self.isolation_timer.timeout.connect(self._check_cold_isolation)
@@ -134,6 +137,11 @@ class App(QMainWindow):
         self.timer.start(40)
         self.statusBar().showMessage("Bitcoin Core connection is local to this computer")
         self._set_core_status("Looking for Bitcoin Core…")
+        if self.cold_required:
+            self._lock_cold_installation()
+            self.mode_choice = "cold"
+            self._select_mode("cold")
+            self.tabs.setCurrentIndex(7)
     def _menus(self):
         menu = self.menuBar().addMenu("Wallet")
         self.wallet_menu = menu
@@ -338,7 +346,7 @@ class App(QMainWindow):
         page, layout = page_layout(30, 24, "OnboardingPage")
         layout.addWidget(label("Cold storage", "Eyebrow"))
         layout.addWidget(label(
-            "Cold signer test mode" if self.dev_keep_network else "Keep this computer offline",
+            "Cold signer test mode" if self.dev_keep_network else "Permanently offline computer",
             "Title",
         ))
         notice = QFrame()
@@ -352,20 +360,35 @@ class App(QMainWindow):
         notice_copy = QVBoxLayout()
         notice_copy.setSpacing(5)
         notice_copy.addWidget(label(
-            "Computer networking stays on" if self.dev_keep_network else "Network access will be disabled",
+            "Computer networking stays on" if self.dev_keep_network else "Never take this computer back online",
             "NoticeTitle",
         ))
         if self.dev_keep_network:
             detail = "Bitcoin Core peer networking remains off. Swap is still disabled. Use test wallets only."
         else:
-            detail = "Swap will also be disabled. Close other programs first; on a low-memory computer, the desktop may freeze."
-        notice_copy.addWidget(label(detail, "Muted"))
+            detail = ("This permanently changes system networking. Once used for a real wallet, never take this computer back online. "
+                      "Closing Core Companion or restarting Linux will not re-enable networking. "
+                      "For the strongest safeguard, physically remove Wi-Fi, Ethernet, Bluetooth and other networking hardware.")
+        warning = label(detail, "Muted")
+        warning.setWordWrap(True)
+        notice_copy.addWidget(warning)
         notice_layout.addLayout(notice_copy, 1)
         layout.addWidget(notice)
+        self.permanent_acknowledgement = QCheckBox(
+            "I understand: a real-wallet computer must never go back online."
+            if not self.dev_keep_network else "Testing only: never put real wallet keys on this VM.")
+        self.permanent_acknowledgement.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
+        layout.addWidget(self.permanent_acknowledgement)
+        memory_note = label("Swap is disabled while signing. Close other programs first; low memory can freeze the desktop.", "Muted")
+        memory_note.setWordWrap(True)
+        layout.addWidget(memory_note)
         layout.addStretch(1)
         footer = QHBoxLayout()
         footer.addStretch()
-        continue_button = button("Continue", self._begin_cold_signer, True)
+        continue_button = button("Continue (testing)" if self.dev_keep_network else "Commit to permanent offline mode",
+                                 self._begin_cold_signer, True)
+        continue_button.setEnabled(False)
+        self.permanent_acknowledgement.toggled.connect(continue_button.setEnabled)
         continue_button.setObjectName("ColdContinue")
         footer.addWidget(continue_button)
         layout.addLayout(footer)
@@ -521,6 +544,8 @@ class App(QMainWindow):
         return result
 
     def _select_mode(self, mode):
+        if mode == "online" and not self._allow_online():
+            return
         self.mode_choice = mode
         self.cold_choice.setChecked(mode == "cold")
         self.online_choice.setChecked(mode == "online")
@@ -530,6 +555,8 @@ class App(QMainWindow):
         self.mode_continue.setEnabled(True)
 
     def _continue_mode(self):
+        if self.mode_choice == "online" and not self._allow_online():
+            return
         if self.mode_choice == "cold":
             self.start_cold_signer()
         elif self.mode_choice == "online":
@@ -889,6 +916,8 @@ class App(QMainWindow):
         self._dialog_help(self.connection)
 
     def show_connection(self):
+        if not self._allow_online():
+            return
         if self.tabs.currentIndex() not in (0, 1):
             self.connection_purpose = "online"
         managed = self.managed_core_process
@@ -986,6 +1015,8 @@ class App(QMainWindow):
         scanner.stop()
 
     def download_bitcoin_core(self):
+        if not self._allow_online():
+            return
         if sys.platform != "linux":
             QMessageBox.information(
                 self,
@@ -1070,6 +1101,8 @@ class App(QMainWindow):
         self.port.setText(str(port))
 
     def _start_managed_node(self, binary=None, *, prefer_existing=True):
+        if not self._allow_online():
+            return
         if sys.platform != "linux":
             self.statusBar().showMessage("Starting a downloaded Core node is available on Linux.")
             return
@@ -1081,7 +1114,7 @@ class App(QMainWindow):
 
         binary = Path(binary) if binary else self._installed_core_binary()
         if not binary or not binary.is_file():
-            self._set_core_status("Download and verify Bitcoin Core first", "error")
+            self._set_core_status("Install verified Core from offline media" if self.cold_required else "Download and verify Bitcoin Core first", "error")
             self.statusBar().showMessage("Download and verify Bitcoin Core from Welcome, then choose Online Node.")
             return
 
@@ -1184,8 +1217,8 @@ class App(QMainWindow):
             self.statusBar().showMessage("Finish or cancel the Core download before starting cold storage.")
             return
         if not self._installed_core_binary():
-            self._set_core_status("Download and verify Bitcoin Core first", "error")
-            self.statusBar().showMessage("Download and verify Core on Welcome before starting cold storage.")
+            self._set_core_status("Install verified Core from offline media" if self.cold_required else "Download and verify Bitcoin Core first", "error")
+            self.statusBar().showMessage("Never reconnect. Transfer a verified Core installation from trusted offline media." if self.cold_required else "Download and verify Core on Welcome before starting cold storage.")
             self.tabs.setCurrentIndex(0)
             return
         if self.busy:
@@ -1218,10 +1251,22 @@ class App(QMainWindow):
                 return
         bitcoind = self._installed_core_binary()
         if not bitcoind:
-            self._set_core_status("Download and verify Bitcoin Core first", "error")
-            self.statusBar().showMessage("Download and verify Core on Welcome before starting cold storage.")
+            self._set_core_status("Install verified Core from offline media" if self.cold_required else "Download and verify Bitcoin Core first", "error")
+            self.statusBar().showMessage("Never reconnect. Transfer a verified Core installation from trusted offline media." if self.cold_required else "Download and verify Core on Welcome before starting cold storage.")
             self.tabs.setCurrentIndex(0)
             return
+        if not self.permanent_acknowledgement.isChecked():
+            return
+        if not self.dev_keep_network:
+            try:
+                PermanentAirgap.activate()
+            except (ColdSetupError, OSError) as exc:
+                if PermanentAirgap.is_committed():
+                    self._lock_cold_installation()
+                QMessageBox.critical(self, "Permanent offline setup incomplete",
+                    str(exc) + "\n\nNo signer was started. This app will not enable networking. Keep this computer offline and retry setup.")
+                return
+            self._lock_cold_installation()
         session = ColdSystemSession(disable_networking=not self.dev_keep_network)
         self.cold_session = session
         try:
@@ -1243,6 +1288,7 @@ class App(QMainWindow):
                 self.cold_session = None
                 QMessageBox.critical(self, "Cold signer could not start", str(exc))
             return
+        self.network.setText("DEVELOPMENT · NOT AIR-GAPPED" if self.dev_keep_network else "● Permanent offline policy verified")
         self.cold_session_id = secrets.token_hex(16)
         self.isolation_timer.start()
         self.sync_timer.stop()
@@ -1252,7 +1298,7 @@ class App(QMainWindow):
         self.cold_button_top.setEnabled(False)
         self.statusBar().showMessage(
             "DEV MODE · host networking on · Core P2P off · swap off"
-            if self.dev_keep_network else "Cold session active · networking and swap are off"
+            if self.dev_keep_network else "Permanent offline policy verified · swap off"
         )
         process = QProcess(self)
         self.cold_process = process
@@ -1399,8 +1445,15 @@ class App(QMainWindow):
         self.cold_button_top.setEnabled(True)
         self.statusBar().showMessage(
             "Cold session closed · swap restored; networking was left on"
-            if self.dev_keep_network else "Cold session closed · previous network and swap settings restored"
+            if self.dev_keep_network else "Cold session closed · swap restored · networking remains permanently disabled"
         )
+        if not self.dev_keep_network:
+            try:
+                PermanentAirgap.assert_enforced()
+                self.network.setText("● Permanent offline policy verified")
+            except ColdSetupError:
+                self.network.setText("○ Offline protection NOT verified")
+                self.statusBar().showMessage("Signer stopped · offline protection cannot be verified · keep this computer disconnected")
 
     def _cold_helper_finished(self, exit_code, exit_status):
         self._restore_cold_system()
@@ -1492,6 +1545,8 @@ class App(QMainWindow):
         self.network.setText("○  Offline")
 
     def connect(self):
+        if not self._allow_online():
+            return
         if self.busy:
             return
         try:
@@ -1546,6 +1601,9 @@ class App(QMainWindow):
         )
 
     def connected(self, service, data, selected_wallet=None):
+        if self.cold_required:
+            self.service = None
+            return
         self.connection_fallback = False
         self.node_start_timer.stop()
         if data["chain"].get("chain") != "main":
@@ -1820,7 +1878,7 @@ class App(QMainWindow):
             "Cold signer is active",
             "Closing the main app will close the cold signer and stop its temporary Core process. "
             + ("Swap will be restored; host networking was left on."
-               if self.dev_keep_network else "Networking and swap will be restored after those processes stop."),
+               if self.dev_keep_network else "Swap will be restored after those processes stop. Networking remains permanently disabled."),
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Close,
             QMessageBox.StandardButton.Cancel,
         )
@@ -2055,6 +2113,30 @@ class App(QMainWindow):
             fee=fee, allowed=acceptance.get("allowed") is True)
 
 
+    def _lock_cold_installation(self):
+        self.permanent_cold = PermanentAirgap.is_committed()
+        self.cold_required = True
+        self.online_choice.setEnabled(False)
+        self.download_button.setEnabled(False)
+        self.connection.hide()
+        self.sync_timer.stop()
+        self.node_start_timer.stop()
+        self.connection_fallback = False
+        self.service = None
+        self.mode_indicator.setText("PERMANENT COLD")
+        self.mode_indicator.setProperty("mode", "cold")
+        self._set_core_status("Permanent cold installation · online functions disabled")
+        self.network.setText("○ Offline protection requires verification")
+        self.statusBar().showMessage("Never reconnect this computer after using a real wallet. Remove networking hardware for the strongest safeguard.")
+
+    def _allow_online(self):
+        if self.cold_required or PermanentAirgap.is_committed():
+            self._lock_cold_installation()
+            self.statusBar().showMessage("Online functions are permanently blocked on this cold installation.")
+            return False
+        return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Bitcoin Core wallet companion")
     parser.add_argument("--version", action="version", version=f"Core Companion {__version__}")
@@ -2068,6 +2150,8 @@ def main(argv=None):
             help="development only: leave host networking enabled during cold signer sessions",
         )
     args = parser.parse_args(argv)
+    if args.dev_keep_network and PermanentAirgap.is_committed():
+        parser.error("This computer is committed to permanent offline mode. The development network bypass is forbidden.")
     application = QApplication(["core-companion"])
     application.setApplicationName("Core Companion")
     application.setOrganizationName("CoreCompanion")
@@ -2088,7 +2172,9 @@ def main(argv=None):
         return
     window = App(dev_keep_network=args.dev_keep_network)
     window.show()
-    if default_cookie_path().is_file():
+    if window.cold_required:
+        window._set_core_status("Permanent cold installation · online functions disabled")
+    elif default_cookie_path().is_file():
         window._use_core_connection(default_cookie_path(), 8332)
         QTimer.singleShot(0, window.connect)
     elif sys.platform == "linux" and (managed_node_dir() / ".cookie").is_file():

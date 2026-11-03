@@ -21,7 +21,7 @@ call that RPC instead of adding parallel wallet logic.
 - `run.py`: cold-helper process isolation and early core-dump restrictions.
 - `install.py`, `core-companion`: hash-locked dependency installation and the
   Linux desktop launcher. `tools/build_release.py` builds the source archive.
-- `linux_cold.py`: host network and swap state changes and restoration.
+- `linux_cold.py`: permanent network policy verification and temporary swap disable/restore.
 - `offline_core.py`: isolated Core lifecycle, BIP87 descriptors, address checks,
   watch-only export, and PSBT review/signing.
 - `seed.py`: temporary-wallet hashing, entropy mixing, BIP39, and BIP32 root.
@@ -56,7 +56,7 @@ the network in that mode. The release builder disables this command-line flag;
 do not use development mode with wallets holding funds.
 The UI helper starts in its own process group, disables core dumps and Linux
 dumpability, then stops Core and removes its session directory before the
-controller restores the prior host settings.
+controller restores prior swap settings only; networking remains permanently disabled.
 
 Host network/swap state is checked every two seconds by the controller. A failed
 check stops the signer process group and invokes cleanup before restoring
@@ -130,7 +130,7 @@ bounded, and a stale managed cookie no longer causes an endless reconnect loop.
    descriptors with full key origins, asks Core to checksum and import them,
    then checks that Core recognizes the first receive address as its own.
 6. On close, stop Core, remove its tmpfs session directory, and restore the
-   previous swap and link states. Python does not guarantee erasure of secret
+   previous swap state only. Networking is never re-enabled. Python does not guarantee erasure of secret
    strings from process memory. The helper isolation reduces exposure but does
    not make this a reviewed or production-secure signer.
 
@@ -200,3 +200,14 @@ Do not treat a small codebase or Core-backed operations as a substitute for an
 independent security review.
 
 The new storage.py owns atomic encrypted Core backups and a single-writer file lock. public_wallet.py owns public-key version conversion and Core-validated multipath interchange. The online send path delegates funding, decoding, finalization, mempool checks and explicitly approved broadcast to Core. PSBTv0 is requested for broad external-signer compatibility.
+
+## Permanent offline commitment (supersedes session-only network restoration)
+
+Normal mode installs the root-owned boot firewall/radio/link policy and timer in
+PERMANENT_AIRGAP.md. linux_cold.NetworkSession now verifies that policy and has
+no network restoration or enable method. ColdSystemSession.restore restores
+swap only. permanent_airgap.py checks per-boot fresh root success, exact policy
+files, masks, timer and current links/radios before private operations. The app
+locks online paths and startup connections once committed. The development flag
+cannot bypass an existing machine-wide commitment. Installer and Core downloader
+also enforce offline operation. Hardware removal remains the strongest safeguard.

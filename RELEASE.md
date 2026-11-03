@@ -59,7 +59,7 @@ Installation follows [pip hash-checking guidance](https://pip.pypa.io/en/stable/
 - Independent review of seed handling, public-policy recovery, transaction
   display/signing, OS isolation and release verification.
 - Debian desktop acceptance: clean install, actual administrator prompts,
-  network and swap disable/restore, hotplug isolation failure, closing/crash
+  permanent network disable, swap disable/restore, hotplug isolation failure, closing/crash
   handling, QR camera access, and complete backup/recovery across two devices.
   Use disposable wallets and independently compare every address and signature.
 - Select the project's redistribution license and complete dependency notices
@@ -71,3 +71,5 @@ Installation follows [pip hash-checking guidance](https://pip.pypa.io/en/stable/
 Windows and ARM64 need their own acceptance runs before being advertised as
 supported release targets. Existing validation evidence and its limits are in
 [AUDIT.md](AUDIT.md).
+
+Permanent offline release acceptance must cover first-time authorization, reboot with the guard before network managers, radio/NIC hot-plug, suspend/resume, failed setup, tamper refusal and offline updates. Perform these on a disposable Debian VM with no real keys. A committed installation must reject the development flag and all online paths. Never reconnect a real signer to perform release acceptance. See PERMANENT_AIRGAP.md.

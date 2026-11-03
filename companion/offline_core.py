@@ -17,6 +17,7 @@ from .linux_cold import ColdSetupError, NetworkSession, _active_swaps, _mount_ty
 from .rpc import CoreError, CoreRPC
 from .seed import hash_wallet_dat, master_xprv
 from .storage import ColdWalletStore
+from .permanent_airgap import PermanentAirgap
 from .public_wallet import combined_public_descriptor
 
 
@@ -77,6 +78,8 @@ class OfflineCore:
 
     def _assert_isolation(self):
         """Recheck host isolation at every key-generation or signing boundary."""
+        if self.dev_keep_network and PermanentAirgap.is_committed():
+            raise ColdSetupError("The development network bypass is forbidden on a permanently offline installation.")
         if _active_swaps():
             raise ColdSetupError("System swap became active. Close the signer before continuing.")
         if not self.dev_keep_network:
@@ -209,6 +212,8 @@ class OfflineCore:
     def start(self):
         if sys.platform != "linux":
             raise ColdSetupError("The cold signer currently requires Linux.")
+        if self.dev_keep_network and PermanentAirgap.is_committed():
+            raise ColdSetupError("Development networking cannot be used on a permanently offline installation.")
         if not self.binary.is_file() or not os.access(self.binary, os.X_OK):
             raise ColdSetupError("Select an executable Bitcoin Core bitcoind binary.")
         if _mount_type(self.base) != "tmpfs":

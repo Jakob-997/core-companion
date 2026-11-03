@@ -202,3 +202,23 @@ This implementation work does not replace independent security review or a
 full Debian camera, desktop authorization and isolation acceptance pass.
 
 Additional checks exercise the actual Qt-to-Core save/switch/reopen path, preserved used labels, address removal without key loss, backup failure preventing close/switch, and reopening after a Core restart. Encrypted multisig reopening, rejection of plaintext backups and concurrent writers also pass. All main native pages fit 980×680 in both themes; a signed-transaction dialog opens without an implicit default broadcast button. Camera hardware and GNOME integration remain manual VM acceptance items.
+
+## Permanent air-gap correction
+
+Historical references to restoring networking are superseded. Networking is now
+permanently disabled in normal cold mode, with root-owned boot enforcement and
+a repeating guard. All network-enable/restore code was removed from NetworkSession.
+A per-user commitment plus system policy detection blocks online startup,
+online mode, Core downloads and source-development bypasses. The installer uses
+no-index offline resolution on committed computers. Explicit warnings prohibit
+reconnecting real signers and recommend removing networking hardware.
+
+Kernel namespace tests pass for IPv4/IPv6 and established traffic blocking,
+loopback RPC, ARP default drop, idempotent loading and repair after policy/rule/
+dormancy changes. Guard/GUI tests pass for stale and wrong-boot status, changed
+files, missing masks, inactive timers, unblocked radios, active interfaces,
+failed setup keeping the commitment, online/download/CLI blocking and offline
+installer argv. Root script syntax and systemd service/timer verification pass.
+No permanent policy, service or radio setting was installed on the review host.
+Real Debian boot/reboot, authorization and hardware acceptance remain pending;
+software checks are not a physical air-gap guarantee.

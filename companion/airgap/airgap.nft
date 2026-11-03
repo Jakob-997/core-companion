@@ -1,0 +1,12 @@
+# Reapplied as one nft transaction. Only our own tables are changed.
+add table inet core_companion_airgap
+flush table inet core_companion_airgap
+add chain inet core_companion_airgap input { type filter hook input priority -310; policy drop; }
+add chain inet core_companion_airgap output { type filter hook output priority -310; policy drop; }
+add chain inet core_companion_airgap forward { type filter hook forward priority -310; policy drop; }
+add rule inet core_companion_airgap input iifname "lo" accept
+add rule inet core_companion_airgap output oifname "lo" accept
+add table arp core_companion_airgap
+flush table arp core_companion_airgap
+add chain arp core_companion_airgap input { type filter hook input priority 0; policy drop; }
+add chain arp core_companion_airgap output { type filter hook output priority 0; policy drop; }

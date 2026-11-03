@@ -6,12 +6,22 @@ import subprocess
 import sys
 import venv
 from pathlib import Path
+from companion import DEVELOPMENT_BUILD
+from companion.permanent_airgap import PermanentAirgap
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-desktop", action="store_true", help="install dependencies only")
+    parser.add_argument("--offline", action="store_true", help="use transferred wheels or matching installed dependencies, without an index")
+    parser.set_defaults(dev_keep_network=False)
+    if DEVELOPMENT_BUILD:
+        parser.add_argument("--dev-keep-network", action="store_true", help="disposable development VM only")
     args = parser.parse_args()
+    if args.dev_keep_network and PermanentAirgap.is_committed():
+        parser.error("Development networking is forbidden on a permanently offline computer.")
+    offline = (args.offline or PermanentAirgap.is_committed()
+               or (PermanentAirgap.saved_wallets_exist() and not args.dev_keep_network))
     if sys.platform != "linux" or not (3, 11) <= sys.version_info[:2] < (3, 16):
         parser.error("Use Linux with Python 3.11–3.15.")
     if os.geteuid() == 0:
@@ -28,11 +38,20 @@ def main():
         python = str(environment / "bin" / "python")
         if not (environment / "pyvenv.cfg").is_file() or not Path(python).is_file():
             raise OSError("The existing .venv is incomplete. Move it aside, then run the installer again.")
-        subprocess.run([
-            python, "-E", "-s", "-m", "pip", "--isolated", "install",
-            "--require-hashes", "--only-binary=:all:", "--no-deps", "--force-reinstall",
-            "-r", str(root / "requirements.txt"),
-        ], check=True)
+        command = [python, "-E", "-s", "-m", "pip", "--isolated", "--disable-pip-version-check", "install",
+                   "--require-hashes", "--only-binary=:all:", "--no-deps"]
+        if offline:
+            command.append("--no-index")
+            wheels = root / "wheels"
+            if wheels.is_dir():
+                command.extend(("--find-links", str(wheels), "--force-reinstall"))
+            else:
+                # Pip resolves the lock against installed packages without fetching.
+                # A fresh or changed dependency set needs transferred hash-matching wheels.
+                command.append("--dry-run")
+        else:
+            command.append("--force-reinstall")
+        subprocess.run([*command, "-r", str(root / "requirements.txt")], check=True)
         subprocess.run([python, "-E", "-s", "-m", "pip", "check"], check=True)
         subprocess.run([
             python, "-E", "-s", "-c",
@@ -58,7 +77,9 @@ def main():
                 "Categories=Office;Finance;\nStartupNotify=true\n", encoding="utf-8",
             )
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
-        print(f"Installation stopped: {exc}\nOn Debian, install python3-venv and try again.", file=sys.stderr)
+        hint = ("Keep this computer offline. Transfer the locked Linux wheels in a wheels/ folder and retry."
+                if offline else "On Debian, install python3-venv and try again.")
+        print(f"Installation stopped: {exc}\n{hint}", file=sys.stderr)
         return 1
     print("Installed. Open Core Companion from your applications menu." if not args.no_desktop
           else "Dependencies installed. Run ./core-companion.")

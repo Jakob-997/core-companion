@@ -1,4 +1,4 @@
-"""Linux host isolation for the short-lived cold signer session."""
+"""Permanent Linux network verification and temporary swap isolation."""
 
 import json
 import os
@@ -147,18 +147,7 @@ class SwapSession:
 
 
 class NetworkSession:
-    """Turn off every non-loopback Linux network link for the cold session."""
-
-    SERVICE = "org.freedesktop.NetworkManager"
-    OBJECT = "/org/freedesktop/NetworkManager"
-    INTERFACE = "org.freedesktop.NetworkManager"
-
-    def __init__(self):
-        self.was_enabled = None
-        self.network_manager_available = False
-        self.interfaces = []
-        self.changed = False
-
+    """Verify the permanent offline policy; never restore or enable networking."""
     @staticmethod
     def _run_capture(args, timeout=10):
         try:
@@ -176,19 +165,6 @@ class NetworkSession:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ColdSetupError("Cannot inspect the Linux network state.") from exc
 
-    @staticmethod
-    def _nm_enabled():
-        busctl = _system_tool("busctl")
-        if not busctl:
-            raise ColdSetupError("Cannot verify NetworkManager state; install systemd's busctl tool.")
-        result = NetworkSession._run_capture([
-            busctl, "get-property", NetworkSession.SERVICE, NetworkSession.OBJECT,
-            NetworkSession.INTERFACE, "NetworkingEnabled",
-        ])
-        value = result.stdout.strip().split()
-        if result.returncode != 0 or len(value) != 2 or value[0] != "b" or value[1] not in ("true", "false"):
-            raise ColdSetupError("NetworkManager is unavailable or returned an unexpected state.")
-        return value[1] == "true"
 
     @staticmethod
     def _interfaces():
@@ -216,72 +192,15 @@ class NetworkSession:
             interfaces.append((row["ifname"], "UP" in flags))
         return interfaces
 
-    @staticmethod
-    def _set_manager(enabled):
-        nmcli = _system_tool("nmcli")
-        if not nmcli:
-            raise ColdSetupError("NetworkManager's nmcli tool is unavailable.")
-        result = NetworkSession._run_capture([nmcli, "networking", "on" if enabled else "off"], timeout=30)
-        if result.returncode != 0:
-            raise ColdSetupError("NetworkManager could not change its networking state.")
-
-    @staticmethod
-    def _set_link(name, enabled):
-        _PrivilegedCommand.run("ip", "link", "set", "dev", name, "up" if enabled else "down")
-
     def assert_disabled(self):
-        if self.network_manager_available or _system_tool("nmcli"):
-            if self._nm_enabled():
-                raise ColdSetupError("NetworkManager is still enabled; cold Core will not be started.")
-        if any(up for _, up in self._interfaces()):
-            raise ColdSetupError("A non-loopback network link is still up; cold Core will not be started.")
+        from .permanent_airgap import PermanentAirgap
+        PermanentAirgap.assert_enforced()
 
     def disable(self):
-        if sys.platform != "linux":
-            raise ColdSetupError("Cold signer setup currently requires Linux.")
-        self.interfaces = self._interfaces()
-        self.network_manager_available = bool(_system_tool("nmcli"))
-        if self.network_manager_available:
-            self.was_enabled = self._nm_enabled()
-        self.changed = True
-        try:
-            if self.was_enabled:
-                self._set_manager(False)
-                if self._nm_enabled():
-                    raise ColdSetupError("NetworkManager did not disable networking.")
-            for name, was_up in self.interfaces:
-                if was_up:
-                    self._set_link(name, False)
-            still_up = [(name, up) for name, up in self._interfaces() if up]
-            if still_up:
-                names = ", ".join(name for name, _ in still_up)
-                raise ColdSetupError(f"Networking remains enabled on {names}. Cold signer was not started.")
-        except Exception:
-            try:
-                self.restore()
-            except ColdSetupError:
-                pass
-            raise
-
-    def restore(self):
-        if not self.changed:
-            return
-        if self.network_manager_available and self.was_enabled:
-            self._set_manager(True)
-            if not self._nm_enabled():
-                raise ColdSetupError("The cold session ended, but NetworkManager did not restore networking.")
-        for name, was_up in self.interfaces:
-            if was_up:
-                self._set_link(name, True)
-        current = dict(self._interfaces())
-        missing = [name for name, was_up in self.interfaces if was_up and not current.get(name, False)]
-        if missing:
-            raise ColdSetupError("The cold session ended, but some network links could not be restored: " + ", ".join(missing))
-        self.changed = False
-
+        self.assert_disabled()
 
 class ColdSystemSession:
-    """Disable host networking by default, always disable swap, then restore state."""
+    """Require permanent offline protection; disable/restore swap for key use."""
 
     def __init__(self, disable_networking=True):
         self.disable_networking = bool(disable_networking)
@@ -291,15 +210,11 @@ class ColdSystemSession:
     def begin(self):
         if self.disable_networking:
             self.network.disable()
-        try:
-            self.swap.disable()
-        except Exception:
-            if self.disable_networking:
-                try:
-                    self.network.restore()
-                except ColdSetupError:
-                    pass
-            raise
+        else:
+            from .permanent_airgap import PermanentAirgap
+            if PermanentAirgap.is_committed():
+                raise ColdSetupError("Development networking is forbidden on this permanently offline computer.")
+        self.swap.disable()
 
     def assert_disabled(self):
         """Fail if host isolation was changed after the cold session began."""
@@ -309,12 +224,5 @@ class ColdSystemSession:
             self.network.assert_disabled()
 
     def restore(self):
-        errors = []
-        # Keep connectivity disabled until swap has been restored and Core is gone.
-        for session in (self.swap, self.network):
-            try:
-                session.restore()
-            except ColdSetupError as exc:
-                errors.append(str(exc))
-        if errors:
-            raise ColdSetupError(" ".join(errors))
+        """Restore swap only after Core stops. Networking is never restored."""
+        self.swap.restore()

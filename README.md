@@ -18,7 +18,7 @@ Use Python 3.11–3.15 and a normal desktop user. Do not run the app as root.
 
 ```sh
 sudo apt update
-sudo apt install -y python3-venv gnupg wget pkexec iproute2 util-linux zbar-tools libegl1 libxcb-cursor0
+sudo apt install -y python3-venv gnupg wget pkexec iproute2 nftables rfkill util-linux zbar-tools libegl1 libxcb-cursor0
 python3 install.py
 ./core-companion
 ```
@@ -38,10 +38,10 @@ agent. NetworkManager installations also need `nmcli` and `busctl`.
 ## Choose a wallet mode
 
 - **Cold storage:** a separate, temporary Core process with private keys in RAM.
-  Networking and system swap are disabled before it starts. Close other programs
+  Normal setup permanently commits the computer to offline operation. Networking is never automatically restored, including after closing or rebooting. System swap is disabled before private-key use. Close other programs
   first; disabling swap on a low-memory machine can freeze the desktop.
 - **Online node (watch-only):** connect to a local Core or start the app-managed
-  node. Import the public wallet from your signer to view balances and history
+  node on a separate online installation. A committed cold installation cannot switch to online mode. Import the public wallet from your signer to view balances and history
   generate receiving addresses and create unsigned PSBTs. Import a signed PSBT, review its outputs, then explicitly approve broadcasting through Core. This mode has no private keys.
 
 The welcome screen downloads and verifies Core when needed. It requires three
@@ -55,6 +55,23 @@ a 10,000 MiB pruning target. It keeps syncing after the interface closes. An
 existing node in the standard Core directory is tried first. Only loaded
 wallets with private keys disabled appear in the online view. A pruned node
 cannot rescan discarded blocks when importing an older wallet.
+
+## Permanent air gap
+
+**Never take a computer used for a real wallet back online. For the strongest
+safeguard, physically remove Wi-Fi, Ethernet, Bluetooth and other networking
+hardware. Closing or deleting the wallet does not make reconnection safe.**
+
+Normal cold setup installs a root-owned boot service, continuous offline guard
+and default-drop firewall. It disables network managers and radios and keeps
+interfaces down across sessions/reboots. Private-key operations require verified
+protection; failed setup never rolls back online. Downloads, the online node
+and the development bypass are blocked on committed computers. See
+[PERMANENT_AIRGAP.md](PERMANENT_AIRGAP.md) for the files, checks and limits.
+
+Prepare dependencies and verified Core before cold setup. After real keys have
+been present, transfer updates from a separate connected computer and run
+**python3 install.py --offline**. Never reconnect the real signer for updates.
 
 ## Cold signing and backups
 
@@ -91,8 +108,7 @@ file or paste. Review every output and fee before signing. Core supplies the dec
 offline signer cannot independently validate input amounts against the chain.
 Large public exports and PSBTs can be saved to files when one QR is insufficient.
 
-When closing normally, Core is stopped and RAM files removed before previous
-swap/network settings are restored. Isolation is checked periodically and
+When closing normally, Core is stopped and RAM files removed before previous swap settings are restored. Networking remains permanently disabled. Isolation is checked periodically and
 before private-key operations. This is a desktop precaution, not protection
 against a compromised OS. Forced termination or power loss can interrupt cleanup;
 a restart or manual restoration may be necessary.
@@ -117,7 +133,7 @@ From a source checkout only:
 
 This leaves host networking on, keeps Core peer networking off, still disables
 swap and adds **Skip confirmation (testing)**. Use disposable wallets. The
-release builder disables this flag in the packaged application.
+release builder disables this flag in the packaged application. It is also rejected on any already-committed cold computer. For a disposable testing VM with saved test wallets, use **python3 install.py --dev-keep-network** to permit a normal development dependency installation.
 
 ## Review and release
 

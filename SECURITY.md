@@ -10,8 +10,7 @@ PyPI during installation. The online Core node communicates with Bitcoin peers.
 The online UI uses local cookie-authenticated RPC and offers watch-only wallets.
 Cold keys are used in a separate helper and an isolated Core directory on tmpfs. Completed wallets are persisted only as Core-encrypted backups. Labels, public descriptors and wallet names are readable metadata. The saved wallet opens locked; encryption passwords are not stored. The entropy-source wallet remains RAM-only and is removed after hashing.
 The helper disables dumps; host swap and non-loopback network interfaces are
-disabled before normal cold use. Periodic checks stop the signer if isolation
-changes; they cannot prevent every race or privileged change. Source development
+disabled before normal cold use. Normal cold mode now commits to a persistent machine-wide offline policy; networking is never restored by the app. Periodic checks stop the signer if isolation changes; they cannot prevent every race or privileged change. Source development
 mode intentionally leaves host networking on and is unsuitable for valuable keys.
 
 RPC method lists restrict accidental application behavior. They are not a
@@ -28,3 +27,5 @@ descriptors, RPC cookies or real wallet files. No response-time or security
 certification promise is implied by this development repository.
 
 The online send path delegates funding, decoding, finalization, mempool checks and broadcasting to Core. Broadcast requires a separate explicit review action. Public-key version conversion (SLIP132) is transport handling only; the app does not derive public keys outside Core. LifeHash is a visual recognition aid, never a wallet ownership or policy check.
+
+Permanent-mode details and physical-air-gap limits are in [PERMANENT_AIRGAP.md](PERMANENT_AIRGAP.md). Never reconnect a real signer. Physically remove networking hardware for the strongest safeguard. Software cannot guarantee isolation from compromised administrators or firmware.
