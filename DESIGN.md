@@ -8,6 +8,9 @@ The application uses native PySide6 Qt Widgets and the existing dependency lock.
 - A precise desktop workspace with clear text and consistent line icons.
 - Blue identifies cold storage; red identifies the online watch-only node.
 - Both light and dark themes have explicit text, border, focus and error colors.
+- Navy identity panels and restrained native gradients give the application a
+  consistent visual identity. Fingerprint and scanner artwork use Qt painting,
+  with no external assets, new dependencies, animation, or network requests.
 - Wallet identity and signer fingerprint are prominent. The visual fingerprint
   is a recognition aid; it is not a substitute for checking the wallet policy.
 - Setup has a compact progress strip. Optional explanations live in tooltips

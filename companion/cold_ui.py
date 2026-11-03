@@ -31,7 +31,7 @@ from .seed import (
     validate_phrase,
 )
 from .theme import stylesheet
-from .widgets import ActionRow, ChoiceRow, IconButton, LineIcon, fixed_font
+from .widgets import ActionRow, ChoiceRow, FingerprintMark, IconButton, LineIcon, ScanIllustration, fixed_font
 
 
 def _label(text, muted=False):
@@ -492,25 +492,17 @@ class ColdSignerDialog(QDialog):
         identity = QFrame()
         identity.setObjectName("IdentityHero")
         identity.setMinimumWidth(300)
-        identity.setMaximumWidth(360)
+        identity.setMaximumWidth(340)
         identity_row = QVBoxLayout(identity)
-        identity_row.setContentsMargins(28, 28, 28, 28)
-        identity_row.setSpacing(20)
+        identity_row.setContentsMargins(28, 30, 28, 30)
+        identity_row.setSpacing(24)
         self.identity_badge = _label("Cold signer")
         self.identity_badge.setObjectName("ColdBadge")
         identity_row.addWidget(self.identity_badge, 0, Qt.AlignmentFlag.AlignLeft)
-        self.identity_mark = QWidget()
-        self.identity_mark.setObjectName("IdentityMark")
-        self.identity_mark.setFixedSize(116, 116)
-        self.identity_grid = QGridLayout(self.identity_mark)
-        self.identity_grid.setContentsMargins(5, 5, 5, 5)
-        self.identity_grid.setSpacing(2)
-        self.identity_tiles = []
-        for index in range(25):
-            tile = QLabel()
-            tile.setObjectName("IdentityTile")
-            self.identity_grid.addWidget(tile, index // 5, index % 5)
-            self.identity_tiles.append(tile)
+        self.identity_mark = FingerprintMark()
+        self.identity_mark.setFixedSize(144, 144)
+        self.identity_mark.setToolTip("A visual representation of this signer’s fingerprint. Use the complete wallet policy when checking a multisig wallet.")
+        self.identity_mark.installEventFilter(self)
         identity_row.addWidget(self.identity_mark, 0, Qt.AlignmentFlag.AlignLeft)
         identity_copy = QVBoxLayout()
         identity_copy.setSpacing(8)
@@ -534,6 +526,10 @@ class ColdSignerDialog(QDialog):
         self.identity_fingerprint.setFont(fixed_font(18))
         fingerprint_column.addWidget(self.identity_fingerprint)
         identity_row.addLayout(fingerprint_column)
+        rule = QFrame()
+        rule.setObjectName("IdentityRule")
+        rule.setFixedHeight(1)
+        identity_row.addWidget(rule)
         change = IconButton("switch", "Change wallet", self._change_wallet)
         change.setToolTip("Close this temporary signer session before opening another wallet.")
         identity_row.addWidget(change, 0, Qt.AlignmentFlag.AlignLeft)
@@ -545,7 +541,7 @@ class ColdSignerDialog(QDialog):
         eyebrow.setObjectName("SectionLabel")
         eyebrow.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         action_column.addWidget(eyebrow)
-        heading = _label("Wallet actions", False)
+        heading = _label("Choose an action", False)
         heading.setObjectName("HeroTitle")
         heading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         action_column.addWidget(heading)
@@ -554,18 +550,18 @@ class ColdSignerDialog(QDialog):
             tooltip="Verify a receive address or review a PSBT before signing.",
         )
         scan.clicked.connect(lambda: self.stack.setCurrentIndex(9))
-        scan.setMaximumHeight(300)
+        scan.setMaximumHeight(240)
         addresses = ActionRow(
-            "▣", "Wallet addresses", "Addresses and labels",
+            "▣", "Wallet addresses", "View your addresses and labels",
             tooltip="See saved addresses and labels generated or confirmed by this signer.",
         )
         addresses.clicked.connect(self._open_addresses)
         tools = ActionRow(
-            "⚙", "Tools & Settings", "Public exports and preferences",
+            "⚙", "Tools & Settings", "Wallet policy, exports and preferences",
             tooltip="Export the watch-only wallet, view the policy, or change settings.",
         )
         tools.clicked.connect(lambda: self.stack.setCurrentIndex(12))
-        secondary = QHBoxLayout()
+        secondary = QVBoxLayout()
         secondary.setSpacing(16)
         secondary.addWidget(addresses, 1)
         secondary.addWidget(tools, 1)
@@ -581,15 +577,19 @@ class ColdSignerDialog(QDialog):
         self.scan_target = QFrame()
         self.scan_target.setObjectName("ScanTarget")
         self.scan_target.setMinimumHeight(190)
-        scan_layout = QVBoxLayout(self.scan_target)
-        scan_layout.setContentsMargins(20, 18, 20, 18)
-        scan_layout.setSpacing(7)
-        scan_icon = LineIcon("▦", "ScanGlyph", stroke_width=1.7, inset=0)
-        scan_icon.setFixedSize(38, 38)
-        scan_layout.addWidget(scan_icon, 0, Qt.AlignmentFlag.AlignHCenter)
-        scan_layout.addWidget(_label("Ready to scan", False), 0, Qt.AlignmentFlag.AlignHCenter)
-        scan_hint = _label("Point the camera at a wallet QR code.", True)
-        scan_layout.addWidget(scan_hint, 0, Qt.AlignmentFlag.AlignHCenter)
+        scan_layout = QHBoxLayout(self.scan_target)
+        scan_layout.setContentsMargins(28, 24, 28, 24)
+        scan_copy = QVBoxLayout()
+        scan_copy.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        scan_copy.setSpacing(10)
+        scan_ready = _label("Ready to scan")
+        scan_ready.setObjectName("Heading")
+        scan_copy.addWidget(scan_ready)
+        scan_copy.addWidget(_label("Receiving address or unsigned transaction", True))
+        scan_layout.addLayout(scan_copy, 1)
+        artwork = ScanIllustration()
+        artwork.setFixedSize(140, 140)
+        scan_layout.addWidget(artwork)
         layout.addWidget(self.scan_target)
         self.scan_payload = QLineEdit()
         self.scan_payload.setPlaceholderText("Scanned QR data appears here")
@@ -645,31 +645,36 @@ class ColdSignerDialog(QDialog):
         layout.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.address_detail_title)
         detail = QHBoxLayout()
+        detail.setSpacing(28)
         self.address_qr = QLabel()
         self.address_qr.setObjectName("QR")
         self.address_qr.setFixedSize(320, 320)
         self.address_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail.addWidget(self.address_qr, 0, Qt.AlignmentFlag.AlignTop)
         fields = QVBoxLayout()
-        fields.addWidget(_label("ADDRESS", False))
+        address_caption = _label("RECEIVING ADDRESS")
+        address_caption.setObjectName("SectionLabel")
+        fields.addWidget(address_caption)
         self.address_detail_value = QLineEdit()
         self.address_detail_value.setReadOnly(True)
         self.address_detail_value.setFont(fixed_font(9))
         fields.addWidget(self.address_detail_value)
-        fields.addWidget(_label("LABEL · OPTIONAL", False))
+        label_caption = _label("LABEL · OPTIONAL")
+        label_caption.setObjectName("SectionLabel")
+        fields.addWidget(label_caption)
         self.address_detail_label = QLineEdit()
         self.address_detail_label.setPlaceholderText("e.g. Long-term savings")
         fields.addWidget(self.address_detail_label)
-        self.address_used_status = _label("✓  Used on this signer", True)
+        self.address_used_status = _label("Saved on this signer", True)
         fields.addWidget(self.address_used_status)
         fields.addStretch()
         detail.addLayout(fields, 1)
         layout.addLayout(detail)
+        layout.addStretch()
         done = QPushButton("Done")
         done.setObjectName("Primary")
         done.clicked.connect(self._save_address_detail)
         layout.addWidget(done, 0, Qt.AlignmentFlag.AlignRight)
-        layout.addStretch()
 
     def _build_tools_page(self):
         layout = self._card()
@@ -1156,15 +1161,23 @@ class ColdSignerDialog(QDialog):
             content.setContentsMargins(20, 16, 20, 16)
             content.setSpacing(8)
             line = QHBoxLayout()
-            role = "Change · Core verified" if output["is_change"] else (
-                "Own address" if output["is_mine"] else "Recipient · verify address"
+            number = _label(f"{index:02d}")
+            number.setObjectName("OutputIndex")
+            number.setWordWrap(False)
+            line.addWidget(number)
+            role, kind = ("Change · Core verified", "change") if output["is_change"] else (
+                ("Own address", "own") if output["is_mine"] else ("Recipient · verify address", "recipient")
             )
-            caption = _label(f"{index:02d}  {role}")
-            caption.setObjectName("SectionLabel")
-            line.addWidget(caption, 1)
+            caption = _label(role)
+            caption.setObjectName("OutputRole")
+            caption.setWordWrap(False)
+            caption.setProperty("kind", kind)
+            line.addWidget(caption)
+            line.addStretch()
             value = output["amount"]
             amount = _label(f"{Decimal(str(value)):.8f} BTC" if value is not None else "Amount unavailable")
-            amount.setObjectName("Heading")
+            amount.setObjectName("OutputAmount")
+            amount.setWordWrap(False)
             line.addWidget(amount)
             content.addLayout(line)
             address = _label(output["address"])
@@ -1385,6 +1398,8 @@ class ColdSignerDialog(QDialog):
             number = _label(f"{index + 1:02d}")
             number.setObjectName("WordNumber")
             number.setWordWrap(False)
+            number.setFixedWidth(28)
+            number.setAlignment(Qt.AlignmentFlag.AlignCenter)
             line.addWidget(number)
             item = _label(word)
             item.setObjectName("WordText")
@@ -1648,15 +1663,7 @@ class ColdSignerDialog(QDialog):
         self.stack.setCurrentIndex(6)
 
     def _update_identity_mark(self):
-        fingerprint = self.wallet_fingerprint or "00000000"
-        try:
-            bits = f"{int(fingerprint, 16):032b}"[-25:]
-        except ValueError:
-            bits = "0" * 25
-        for index, tile in enumerate(self.identity_tiles):
-            tile.setProperty("lit", bits[index] == "1")
-            tile.style().unpolish(tile)
-            tile.style().polish(tile)
+        self.identity_mark.set_fingerprint(self.wallet_fingerprint)
 
     def _change_wallet(self):
         self._finish()

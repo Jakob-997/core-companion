@@ -1,9 +1,9 @@
 """Small shared Qt widgets used by both wallet modes."""
 
-from PySide6.QtCore import QByteArray, Qt, QRectF, Signal
-from PySide6.QtGui import QFontDatabase, QPainter, QPalette
+from PySide6.QtCore import QByteArray, Qt, QRectF, QSize, Signal
+from PySide6.QtGui import QColor, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 
 _ICONS = {
@@ -91,6 +91,93 @@ class LineIcon(QLabel):
         painter.end()
 
 
+class FingerprintMark(QWidget):
+    """Recognition mark using the same final 25 fingerprint bits as the tile grid."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bits = "0" * 25
+        self.setMinimumSize(88, 88)
+        self.setAccessibleName("Signer fingerprint visual")
+        self.setToolTip("A visual recognition aid based on the signer fingerprint. Check the full wallet policy when setting up multisig.")
+
+    def sizeHint(self):
+        return QSize(144, 144)
+
+    def set_fingerprint(self, fingerprint):
+        try:
+            self._bits = f"{int(fingerprint or '00000000', 16):032b}"[-25:]
+        except (TypeError, ValueError):
+            self._bits = "0" * 25
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        size = min(self.width(), self.height())
+        painter.translate((self.width() - size) / 2, (self.height() - size) / 2)
+        painter.scale(size / 144, size / 144)
+        painter.setPen(QPen(QColor(190, 216, 255, 54), 1))
+        painter.setBrush(QColor(233, 244, 255, 10))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, 143, 143), 22, 22)
+        active = QLinearGradient(18, 18, 122, 126)
+        active.setColorAt(0, QColor("#d1e7ff"))
+        active.setColorAt(1, QColor("#7bb5ff"))
+        for index, bit in enumerate(self._bits):
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(active if bit == "1" else QColor(188, 214, 255, 28))
+            painter.drawRoundedRect(QRectF(18 + index % 5 * 22, 18 + index // 5 * 22, 19, 19), 4, 4)
+        painter.end()
+
+
+class ScanIllustration(QWidget):
+    """Static scanner artwork; decorative shapes contain no encoded QR data."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ScanIllustration")
+        self.setFixedSize(152, 152)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAccessibleName("Decorative scanner illustration")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(self.width() / 152, self.height() / 152)
+        accent = self.palette().color(QPalette.ColorRole.WindowText)
+        faint, line = QColor(accent), QColor(accent)
+        faint.setAlpha(8)
+        line.setAlpha(35)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(faint)
+        painter.drawEllipse(QRectF(5, 5, 142, 142))
+        painter.setPen(QPen(line, 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QRectF(18, 18, 116, 116))
+        painter.save()
+        painter.translate(76, 76)
+        painter.rotate(-8)
+        painter.setPen(QPen(line, 1.2))
+        painter.setBrush(faint)
+        painter.drawRoundedRect(QRectF(-32, -40, 64, 80), 10, 10)
+        for y, width in ((-17, 34), (-5, 26), (7, 34), (19, 18)):
+            painter.drawLine(-17, y, -17 + width, y)
+        painter.restore()
+        painter.setPen(QPen(accent, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        corners = QPainterPath()
+        for x, y, sx, sy in ((31, 35, 1, 1), (121, 35, -1, 1), (31, 117, 1, -1), (121, 117, -1, -1)):
+            corners.moveTo(x, y + sy * 14)
+            corners.lineTo(x, y + sy * 4)
+            corners.quadTo(x, y, x + sx * 4, y)
+            corners.lineTo(x + sx * 14, y)
+        painter.drawPath(corners)
+        scan = QColor(accent)
+        scan.setAlpha(160)
+        painter.setPen(QPen(scan, 1.5))
+        painter.drawLine(24, 76, 128, 76)
+        painter.end()
+
+
 class ActionRow(QFrame):
     clicked = Signal()
 
@@ -106,9 +193,9 @@ class ActionRow(QFrame):
         self.setAccessibleName(title)
         self.setAccessibleDescription(description or tooltip)
         self.setToolTip(tooltip or description)
-        row = QVBoxLayout(self) if hero else QHBoxLayout(self)
+        row = QHBoxLayout(self)
         if hero:
-            row.setContentsMargins(24, 22, 24, 22)
+            row.setContentsMargins(26, 24, 20, 24)
         else:
             row.setContentsMargins(18, 15, 18, 15)
         row.setSpacing(16)
@@ -117,18 +204,14 @@ class ActionRow(QFrame):
         self.icon.setFixedSize(icon_size, icon_size)
         self.arrow = LineIcon("arrow-right" if hero else "chevron-right", "ActionChevron", inset=0, stroke_width=1.8)
         self.arrow.setFixedSize(20, 20)
-        if hero:
-            top = QHBoxLayout()
-            top.addWidget(self.icon)
-            top.addStretch()
-            top.addWidget(self.arrow)
-            row.addLayout(top)
-            row.addStretch()
-        else:
+        if not hero:
             row.addWidget(self.icon)
         copy = QVBoxLayout()
-        copy.setSpacing(6 if hero else 4)
+        copy.setSpacing(9 if hero else 4)
         copy.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        if hero:
+            copy.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignLeft)
+            copy.addStretch()
         self.title_label = QLabel(title)
         self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setWordWrap(True)
@@ -142,9 +225,11 @@ class ActionRow(QFrame):
             detail.setWordWrap(True)
             detail.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             copy.addWidget(detail)
-        row.addLayout(copy, 0 if hero else 1)
-        if not hero:
-            row.addWidget(self.arrow)
+        row.addLayout(copy, 1)
+        if hero:
+            self.illustration = ScanIllustration()
+            row.addWidget(self.illustration, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.arrow, 0, Qt.AlignmentFlag.AlignTop if hero else Qt.AlignmentFlag.AlignVCenter)
 
     def _set_pressed(self, pressed):
         self.setProperty("pressed", pressed)
