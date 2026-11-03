@@ -1,7 +1,8 @@
 """Small shared Qt widgets used by both wallet modes."""
 
 from PySide6.QtCore import QByteArray, Qt, QRectF, QSize, Signal
-from PySide6.QtGui import QColor, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPalette, QPen
+from .vendor.lifehash import LifeHash, LifeHashVersion
+from PySide6.QtGui import QImage, QColor, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QTableWidget, QVBoxLayout, QWidget
 
@@ -156,41 +157,41 @@ class ComboBox(QComboBox):
 
 
 class FingerprintMark(QWidget):
-    """Recognition mark using the same final 25 fingerprint bits as the tile grid."""
+    """LifeHash v2 of the public wallet policy, without theme recoloring."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._bits = "0" * 25
+        self._image = QImage()
+        self._identity = None
         self.setMinimumSize(88, 88)
-        self.setAccessibleName("Signer fingerprint visual")
-        self.setToolTip("A visual recognition aid based on the signer fingerprint. Check the full wallet policy when setting up multisig.")
+        self.setAccessibleName("Wallet LifeHash")
+        self.setToolTip("LifeHash v2 of this wallet's public descriptor. This recognition aid does not replace checking the full wallet policy.")
 
     def sizeHint(self):
         return QSize(144, 144)
 
     def set_fingerprint(self, fingerprint):
-        try:
-            self._bits = f"{int(fingerprint or '00000000', 16):032b}"[-25:]
-        except (TypeError, ValueError):
-            self._bits = "0" * 25
+        self.set_identity(str(fingerprint))
+
+    def set_identity(self, identity):
+        data = identity if isinstance(identity, bytes) else str(identity).encode("utf-8")
+        if data == self._identity:
+            return
+        result = LifeHash.make_from(data, version=LifeHashVersion.version2, module_size=1, has_alpha=False)
+        self._image = QImage(bytes(result.colors), result.width, result.height,
+                             result.width * 3, QImage.Format.Format_RGB888).copy()
+        self._identity = data
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         size = min(self.width(), self.height())
-        painter.translate((self.width() - size) / 2, (self.height() - size) / 2)
-        painter.scale(size / 144, size / 144)
-        painter.setPen(QPen(QColor(190, 216, 255, 54), 1))
-        painter.setBrush(QColor(233, 244, 255, 10))
-        painter.drawRoundedRect(QRectF(0.5, 0.5, 143, 143), 22, 22)
-        active = QLinearGradient(18, 18, 122, 126)
-        active.setColorAt(0, QColor("#d1e7ff"))
-        active.setColorAt(1, QColor("#7bb5ff"))
-        for index, bit in enumerate(self._bits):
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(active if bit == "1" else QColor(188, 214, 255, 28))
-            painter.drawRoundedRect(QRectF(18 + index % 5 * 22, 18 + index // 5 * 22, 19, 19), 4, 4)
+        margin = max(5, size // 18)
+        rectangle = QRectF((self.width() - size) / 2 + margin,
+                           (self.height() - size) / 2 + margin,
+                           size - 2 * margin, size - 2 * margin)
+        painter.fillRect(rectangle, QColor("white"))
+        painter.drawImage(rectangle, self._image)
         painter.end()
 
 

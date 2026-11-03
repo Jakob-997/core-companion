@@ -1,5 +1,7 @@
 """Qt desktop views; Core access remains in wallet.py and rpc.py."""
 import argparse
+import base64
+import hashlib
 import json
 import os
 import queue
@@ -12,16 +14,18 @@ import sys
 import threading
 import time
 from datetime import datetime
+from urllib.parse import urlsplit, parse_qs
 from pathlib import Path
-from PySide6.QtCore import Qt, QProcess, QTimer, QEvent
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QSettings
+from PySide6.QtGui import QAction, QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
     QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip, QScrollArea,
     QStackedWidget, QSizePolicy)
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox, QCheckBox, QFileDialog
 from .qr import qr_pixmap
+from qrcode.exceptions import DataOverflowError
 from .scanner import QRScanner
 from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
@@ -158,6 +162,8 @@ class App(QMainWindow):
         mark = LineIcon("bitcoin", "Mark", stroke_width=1.9, inset=4)
         mark.setFixedSize(38, 38)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.global_back = IconButton("back", "Back", self._go_back)
+        toolbar.addWidget(self.global_back)
         toolbar.addWidget(mark)
         toolbar.addWidget(label("Core Companion", "Brand"))
         self.mode_indicator = label("ONLINE NODE", "HeaderMode")
@@ -197,6 +203,7 @@ class App(QMainWindow):
         self._addresses()
         self._tools()
         self._cold_network_page()
+        self._send()
         self.network = label("○  Offline", "Muted")
         self.statusBar().addPermanentWidget(self.network)
         self.cold_button_top = self.mode_continue
@@ -204,7 +211,9 @@ class App(QMainWindow):
             self.cold_choice.setEnabled(False)
             self.cold_choice.setToolTip("The cold signer is available on Linux in this first release.")
         self.tabs.setCurrentIndex(0)
-        self.tabs.currentChanged.connect(lambda index: self.mode_indicator.setVisible(2 <= index <= 6))
+        self.tabs.currentChanged.connect(lambda index: self.mode_indicator.setVisible(2 <= index <= 6 or index == 8))
+        self.tabs.currentChanged.connect(lambda index: self.global_back.setVisible(index not in (0, 2)))
+        self.global_back.hide()
 
     def _welcome(self):
         page, layout = page_layout(24, 24, "OnboardingPage")
@@ -318,7 +327,6 @@ class App(QMainWindow):
         layout.addLayout(choices)
         layout.addStretch()
         row = QHBoxLayout()
-        row.addWidget(button("‹  Back", lambda: self.tabs.setCurrentIndex(0)))
         row.addStretch()
         self.mode_continue = button("Continue  →", self._continue_mode, True)
         self.mode_continue.setEnabled(False)
@@ -356,7 +364,6 @@ class App(QMainWindow):
         layout.addWidget(notice)
         layout.addStretch(1)
         footer = QHBoxLayout()
-        footer.addWidget(button("‹  Back", self._back_from_cold_notice))
         footer.addStretch()
         continue_button = button("Continue", self._begin_cold_signer, True)
         continue_button.setObjectName("ColdContinue")
@@ -445,7 +452,9 @@ class App(QMainWindow):
         kpis.setSpacing(18)
         self.balance = self._kpi(kpis, "AVAILABLE BALANCE · BTC", "—", main=True)
         self.pending = self._kpi(kpis, "UNCONFIRMED · BTC", "—")
-        self.immature = self._kpi(kpis, "IMMATURE · BTC", "—")
+        self.immature = self._kpi(kpis, "MINED REWARDS · LOCKED", "—")
+        self.immature.setToolTip("Newly mined block rewards cannot be spent until they mature after 100 blocks.")
+        self.immature.parentWidget().hide()
         layout.addWidget(balances)
         actions = QGridLayout()
         actions.setHorizontalSpacing(14)
@@ -456,10 +465,10 @@ class App(QMainWindow):
         )
         receive_action.clicked.connect(self._open_receive)
         send_action = ActionRow(
-            "⇧", "Activity", "",
-            tooltip="Review wallet transactions and confirmations.", icon_key="activity",
+            "⇧", "Send", "",
+            tooltip="Create an unsigned PSBT for your cold signer.", icon_key="send",
         )
-        send_action.clicked.connect(lambda: self.tabs.setCurrentIndex(3))
+        send_action.clicked.connect(lambda: self.tabs.setCurrentIndex(8))
         addresses_action = ActionRow(
             "▣", "Addresses", "",
             tooltip="Browse addresses known to the selected Core wallet.",
@@ -467,7 +476,7 @@ class App(QMainWindow):
         addresses_action.clicked.connect(lambda: self.tabs.setCurrentIndex(5))
         tools_action = ActionRow(
             "⚙", "Tools", "",
-            tooltip="Inspect a PSBT or start a separate cold signer session.",
+            tooltip="Import a signed PSBT, scan its QR, or change appearance.",
         )
         tools_action.clicked.connect(lambda: self.tabs.setCurrentIndex(6))
         for index, action in enumerate((receive_action, send_action, addresses_action, tools_action)):
@@ -583,9 +592,7 @@ class App(QMainWindow):
             "Generate address": "Ask Core for a fresh receiving address with your optional label.",
             "New address": "Open the receiving form to generate a fresh address.",
             "Copy address": "Copy this public address. Compare the complete pasted address with your cold signer before use.",
-            "Done": "Return to the wallet. The generated address and label are already saved in Core.",
-            "Create cold signer wallet": "Start a separate temporary signing wallet in RAM. It does not use the online wallet’s private data.",
-            "Inspect PSBT": "Ask Core to decode and analyze this PSBT without signing or broadcasting it.",
+            "Done": "Save the address label and return to the wallet.",
             "Disconnect": "Disconnect this interface. The Core node keeps running.",
             "Connect": "Connect to Core on this computer using the selected RPC port.",
             "Close": "Close this information window.",
@@ -595,7 +602,6 @@ class App(QMainWindow):
             self.search: "Filter transaction entries on this page by label, address or transaction ID.",
             self.receive_label: "An optional description stored with the new receiving address in Core.",
             self.address: "The complete public receiving address generated by Core.",
-            self.psbt: "Paste a base64 partially signed Bitcoin transaction for read-only inspection.",
             self.port: "The local Core RPC port. The connection always uses 127.0.0.1.",
             self.transactions: "Transactions reported by Core for this wallet. Double-click a row to read its details.",
             self.recent: "Recent wallet entries reported by Core. Double-click a row to read its details.",
@@ -635,11 +641,7 @@ class App(QMainWindow):
         return layout
 
     def _wallet_page_heading(self, layout, title, description=""):
-        row = QHBoxLayout()
-        row.addWidget(label(title, "Title"), 1)
-        row.addWidget(IconButton("back", "Back to wallet", lambda: self.tabs.setCurrentIndex(2),
-                                 tooltip="Return to the wallet overview."))
-        layout.addLayout(row)
+        layout.addWidget(label(title, "Title"))
         if description:
             detail = label(description, "PageDescription")
             detail.setWordWrap(True)
@@ -784,9 +786,12 @@ class App(QMainWindow):
         details = QVBoxLayout(self.receive_details)
         details.setContentsMargins(0, 12, 0, 0)
         details.setSpacing(12)
-        self.receive_used = label("Address saved in your wallet", "InlineNotice")
+        self.receive_used = label("Address ready", "InlineNotice")
         self.receive_used.setProperty("tone", "success")
         details.addWidget(self.receive_used)
+        self.receive_mark_used = QCheckBox("Mark as used")
+        self.receive_mark_used.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
+        details.addWidget(self.receive_mark_used)
         details.addWidget(label("Receiving address", "FieldLabel"))
         self.address = QLineEdit()
         self.address.setReadOnly(True)
@@ -804,13 +809,15 @@ class App(QMainWindow):
         receive_content.addLayout(address_column, 1)
         form.addLayout(receive_content)
         page.addWidget(card)
-        note = label("Verify this address on your cold signer before receiving Bitcoin.", "FooterNote")
+        note = label("Verify this address on your cold signer before receiving Bitcoin.", "InfoStrip")
+        note.setMinimumHeight(58)
+        note.setStyleSheet("font-size: 16px; font-weight: 600; padding: 16px;")
         note.setWordWrap(True)
         page.addWidget(note)
         page.addStretch()
         footer = QHBoxLayout()
         footer.addStretch()
-        self.receive_done = button("Done", lambda: self.tabs.setCurrentIndex(2), True)
+        self.receive_done = button("Done", self._finish_receive, True)
         self.receive_done.hide()
         footer.addWidget(self.receive_done)
         page.addLayout(footer)
@@ -823,7 +830,7 @@ class App(QMainWindow):
         row.addStretch()
         row.addWidget(button("New address", self._open_receive, True))
         page.addLayout(row)
-        self.addresses = self.table(["DESCRIPTION", "ADDRESS", "RECEIVED · BTC"])
+        self.addresses = self.table(["LABEL", "ADDRESS", "USED"])
         self.addresses.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for column, width in [(0, 170), (2, 175)]:
             self.addresses.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
@@ -835,47 +842,14 @@ class App(QMainWindow):
     def _tools(self):
         page = self.page("Tools")
         self._wallet_page_heading(page, "Tools & Settings")
-        columns = QHBoxLayout()
-        columns.setSpacing(20)
-        signer = QFrame()
-        signer.setObjectName("Surface")
-        signer_layout = QVBoxLayout(signer)
-        signer_layout.setContentsMargins(24, 24, 24, 24)
-        signer_layout.setSpacing(16)
-        signer_icon = LineIcon("cold", "WelcomeMark", inset=12)
-        signer_icon.setFixedSize(52, 52)
-        signer_layout.addWidget(signer_icon)
-        signer_layout.addWidget(label("Cold signer", "Heading"))
-        signer_detail = label("Create or recover a signing wallet in a separate, temporary Core session.", "PageDescription")
-        signer_detail.setWordWrap(True)
-        signer_layout.addWidget(signer_detail)
-        signer_layout.addStretch()
-        self.cold_button = button("Create cold signer wallet", self.start_cold_signer, True)
-        self.cold_button.setObjectName("ColdContinue")
-        if sys.platform != "linux":
-            self.cold_button.setEnabled(False)
-            self.cold_button.setToolTip("Linux cold-signer setup is the first target.")
-        signer_layout.addWidget(self.cold_button)
-        columns.addWidget(signer, 1)
-        inspection = QFrame()
-        inspection.setObjectName("Surface")
-        inspection_layout = QVBoxLayout(inspection)
-        inspection_layout.setContentsMargins(24, 24, 24, 24)
-        inspection_layout.setSpacing(16)
-        inspection_layout.addWidget(label("Transaction inspection", "Heading"))
-        inspection_note = label("Ask Core to inspect a PSBT without signing or broadcasting.", "PageDescription")
-        inspection_note.setWordWrap(True)
-        inspection_layout.addWidget(inspection_note)
-        self.psbt = QPlainTextEdit()
-        self.psbt.setPlaceholderText("Paste a base64 PSBT…")
-        self.psbt.setMinimumHeight(150)
-        inspection_layout.addWidget(self.psbt, 1)
-        row = QHBoxLayout()
-        row.addWidget(button("Inspect PSBT", self.inspect, True))
-        row.addStretch()
-        inspection_layout.addLayout(row)
-        columns.addWidget(inspection, 1)
-        page.addLayout(columns)
+        self.cold_button = self.mode_continue
+        imported = ActionRow("import", "Import PSBT", "Scan a QR, paste, or load a PSBT file.",
+                             tooltip="Import a signed transaction and review it before broadcasting.", icon_key="import")
+        imported.clicked.connect(self._import_psbt_dialog)
+        page.addWidget(imported)
+        appearance = ActionRow("dark", "Change appearance", "", tooltip="Switch light and dark mode.", icon_key="dark")
+        appearance.clicked.connect(self._toggle_theme)
+        page.addWidget(appearance)
         page.addStretch()
 
     def _connection_dialog(self):
@@ -888,6 +862,11 @@ class App(QMainWindow):
         self.connection_status = label(self.core_status.text(), "CoreStatus")
         self.connection_status.setWordWrap(True)
         content.addWidget(self.connection_status)
+        self.connection_binary = label("", "FormHint")
+        self.connection_binary.setWordWrap(True)
+        content.addWidget(self.connection_binary)
+        self.connection_version = label("", "FormHint")
+        content.addWidget(self.connection_version)
         form = QFormLayout()
         form.setSpacing(12)
         self.port = QLineEdit("8332")
@@ -912,6 +891,10 @@ class App(QMainWindow):
     def show_connection(self):
         if self.tabs.currentIndex() not in (0, 1):
             self.connection_purpose = "online"
+        managed = self.managed_core_process
+        binary = managed.program() if managed is not None else ""
+        self.connection_binary.setText("Executable: " + binary if binary else "Executable: external Core (path is not reported by RPC)")
+        self.connection_version.setText("Core version: " + str(getattr(self, "node_info", {}).get("subversion", "Not connected")))
         self.connection.show()
         self.connection.raise_()
         self.connection.activateWindow()
@@ -941,9 +924,9 @@ class App(QMainWindow):
         fields.addWidget(name)
         fields.addWidget(label("Public wallet", "FieldLabel"))
         payload = QPlainTextEdit()
-        payload.setPlaceholderText("Scan the cold signer’s public wallet QR, or paste public descriptors")
+        payload.setPlaceholderText("Scan or paste a descriptor, xpub or zpub")
         payload.setFont(fixed_font(10))
-        payload.setToolTip("Public descriptors define the wallet’s addresses. Never paste recovery words or private keys here.")
+        payload.setToolTip("Import a public descriptor, account xpub or zpub. Bare xpubs use native SegWit; use a descriptor for another address type or hardware signing origin. Never paste recovery words or private keys.")
         payload.installEventFilter(self)
         fields.addWidget(payload, 1)
         scanner = QRScanner(dialog)
@@ -980,6 +963,7 @@ class App(QMainWindow):
                 return
             wallet_name = name.text().strip() or str(data.get("name", "")).strip()
             service = self.service
+            self.connection_purpose = "online"
             scanner.stop()
             dialog.accept()
             self.task("Importing wallet and scanning blockchain history…",
@@ -1498,7 +1482,6 @@ class App(QMainWindow):
         self.sync_detail.setText("Local Bitcoin Core")
         self.sync_progress.setValue(0)
         self._set_core_status("Bitcoin Core not connected", "error")
-        self.psbt.clear()
         self._reset_receive()
         self.transactions.setRowCount(0)
         self.recent.setRowCount(0)
@@ -1572,8 +1555,9 @@ class App(QMainWindow):
             return
         self.connection.hide()
         self.service = service
+        self.node_info = data["node"]
         self._set_core_status("Bitcoin Core connected", "connected")
-        self.tabs.setCurrentIndex(1 if self.connection_purpose == "welcome" else 2)
+        self.tabs.setCurrentIndex(2 if selected_wallet else (1 if self.connection_purpose == "welcome" else 2))
         self.update_sync_status(data["chain"])
         self.sync_timer.start()
         self.wallet_picker.blockSignals(True)
@@ -1630,6 +1614,7 @@ class App(QMainWindow):
         self.balance.setText(total("trusted"))
         self.pending.setText(total("untrusted_pending"))
         self.immature.setText(total("immature"))
+        self.immature.parentWidget().setVisible(any(group.get("immature", 0) > 0 for group in groups))
         info, chain = data["info"], data["chain"]
         self.online_name.setText(f"{info['walletname']} (watch-only)")
         self.update_sync_status(chain)
@@ -1660,13 +1645,19 @@ class App(QMainWindow):
                         recent_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                         recent_item.setFont(fixed_font(10))
                     self.recent.setItem(row, column, recent_item)
-        self.address_rows = data["addresses"]
+        preferences = self._address_preferences()
+        self.address_rows = [item for item in data["addresses"] if not preferences.get(item["address"], {}).get("hidden") ]
         self.addresses.setRowCount(len(self.address_rows))
         for row, address in enumerate(self.address_rows):
-            for column, value in enumerate([address.get("label", ""), address["address"], btc(address.get("amount", 0))]):
+            for column, value in enumerate([address.get("label", ""), address["address"], ("✓" if preferences.get(address["address"], {}).get("used", address.get("amount", 0) > 0) else "—")]):
                 item = QTableWidgetItem(value)
                 if column in (1, 2):
                     item.setFont(fixed_font(10))
+                if column == 2:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    font = item.font()
+                    font.setPointSize(18)
+                    item.setFont(font)
                 self.addresses.setItem(row, column, item)
         self.page_label.setText(f"{len(self.rows)} entries  ·  page {self.skip // 100 + 1}")
         self._style_transaction_values()
@@ -1697,6 +1688,9 @@ class App(QMainWindow):
         if not self.service or not self.wallet_picker.currentText():
             self.statusBar().showMessage("Connect and select a wallet first.")
             return
+        if self.busy:
+            QTimer.singleShot(150, lambda: self.generate() if self.tabs.currentIndex() == 4 and not self.address.text() else None)
+            return
         service, name, text = self.service, self.wallet_picker.currentText(), self.receive_label.text()
         self.task("Requesting an address from Core…", lambda: service.receive(name, text), self.received)
 
@@ -1705,6 +1699,7 @@ class App(QMainWindow):
         self.receive_qr.clear()
         self.receive_visual.setCurrentIndex(0)
         self.receive_details.hide()
+        self.receive_mark_used.setChecked(False)
         self.receive_label.clear()
         self.receive_label.setReadOnly(False)
         self.receive_used.hide()
@@ -1714,6 +1709,7 @@ class App(QMainWindow):
     def _open_receive(self):
         self._reset_receive()
         self.tabs.setCurrentIndex(4)
+        QTimer.singleShot(0, self.generate)
 
     def received(self, result):
         self.address.setText(result[0])
@@ -1721,7 +1717,7 @@ class App(QMainWindow):
         self.receive_visual.setCurrentIndex(1)
         self.receive_details.show()
         self.receive_used.show()
-        self.receive_label.setReadOnly(True)
+        self.receive_label.setReadOnly(False)
         self.receive_done.show()
         self.generate_button.hide()
         self.statusBar().showMessage("Address generated by Core. Verify independently before use.")
@@ -1736,22 +1732,50 @@ class App(QMainWindow):
         QApplication.clipboard().setText(address)
         self.statusBar().showMessage("Address copied. Verify the complete pasted address before use.")
 
-    def inspect(self):
-        if not self.service or not self.wallet_picker.currentText():
-            self.statusBar().showMessage("Connect and select a wallet first.")
-            return
-        text = self.psbt.toPlainText().strip()
-        if not text or len(text) > 2 * 1024 * 1024:
-            self.statusBar().showMessage("Enter a base64 PSBT smaller than 2 MiB.")
-            return
-        service, name = self.service, self.wallet_picker.currentText()
-        self.task("Inspecting PSBT…", lambda: service.inspect_psbt(name, text), lambda result: self.show_text("Core PSBT inspection · no signing", json.dumps(result, indent=2, default=str)))
 
     def transaction_details(self, row, column):
         self.show_text("Wallet activity entry", json.dumps(self.rows[row], indent=2, default=str))
 
     def address_details(self, row, column):
-        self.show_text("Receiving address", json.dumps(self.address_rows[row], indent=2, default=str))
+        record = self.address_rows[row]
+        address = record["address"]
+        dialog, layout = self._dialog("Wallet address", size=(840, 620), online=True)
+        qr = QLabel()
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr.setPixmap(self._qr_pixmap(address, size=320))
+        layout.addWidget(qr)
+        value = QLineEdit(address)
+        value.setReadOnly(True)
+        value.setFont(fixed_font(10))
+        layout.addWidget(value)
+        name = QLineEdit(record.get("label", ""))
+        name.setPlaceholderText("Label (optional)")
+        layout.addWidget(name)
+        used = QCheckBox("Mark as used")
+        used.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
+        used.setChecked(self._address_preferences().get(address, {}).get("used", record.get("amount", 0) > 0))
+        layout.addWidget(used)
+        footer = QHBoxLayout()
+        def remove():
+            if QMessageBox.question(dialog, "Remove address from list?",
+                "This address will remain part of the Core wallet and can still receive bitcoin.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes:
+                self._store_address_preference(address, hidden=True)
+                dialog.accept()
+                self.refresh()
+        footer.addWidget(button("Remove address", remove))
+        footer.addStretch()
+        def save():
+            service, wallet = self.service, self.wallet_picker.currentText()
+            self._store_address_preference(address, used=used.isChecked())
+            label_value = name.text()
+            self.task("Saving address label…", lambda: service.rpc.call("setlabel", [address, label_value], wallet=wallet),
+                      lambda _: (dialog.accept(), self.refresh()))
+        footer.addWidget(button("Done", save, True))
+        layout.addLayout(footer)
+        self._dialog_help(dialog)
+        dialog.exec()
 
     def show_text(self, title, content):
         dialog = QDialog(self)
@@ -1820,6 +1844,217 @@ class App(QMainWindow):
         else:
             event.accept()
 
+
+    def _go_back(self):
+        self.recipient_scanner.stop()
+        self.tabs.setCurrentIndex(0 if self.tabs.currentIndex() == 1 else 1 if self.tabs.currentIndex() == 7 else 2)
+
+    def _address_preferences(self):
+        wallet = self.wallet_picker.currentText()
+        endpoint = str(self.service.rpc.cookie_path) if self.service else ""
+        self.address_settings_key = "addresses/" + hashlib.sha256((endpoint + "/" + wallet).encode()).hexdigest()
+        try:
+            value = json.loads(QSettings("CoreCompanion", "CoreCompanion").value(self.address_settings_key, "{}"))
+            return {key: item for key, item in value.items() if isinstance(key, str) and isinstance(item, dict)} if isinstance(value, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    def _store_address_preference(self, address, **values):
+        preferences = self._address_preferences()
+        preferences.setdefault(address, {}).update(values)
+        QSettings("CoreCompanion", "CoreCompanion").setValue(self.address_settings_key, json.dumps(preferences))
+
+    def _finish_receive(self):
+        address = self.address.text()
+        if not address or not self.service:
+            return
+        self._store_address_preference(address, used=self.receive_mark_used.isChecked())
+        service, wallet, text = self.service, self.wallet_picker.currentText(), self.receive_label.text()
+        self.task("Saving label…", lambda: service.rpc.call("setlabel", [address, text], wallet=wallet),
+                  lambda _: (self.tabs.setCurrentIndex(2), self.refresh()))
+
+    def _send(self):
+        page = self.page("Send")
+        self._wallet_page_heading(page, "Send Bitcoin", "Create an unsigned transaction for your cold signer.")
+        panel = QFrame()
+        panel.setObjectName("FormPanel")
+        form = QFormLayout(panel)
+        form.setContentsMargins(24, 24, 24, 24)
+        form.setSpacing(16)
+        recipient_row = QHBoxLayout()
+        self.send_recipient = QLineEdit()
+        self.send_recipient.setToolTip("Recipient Bitcoin address. Scan a Bitcoin payment QR or paste the address.")
+        self.send_recipient.setPlaceholderText("Recipient address")
+        recipient_row.addWidget(self.send_recipient, 1)
+        self.recipient_scanner = QRScanner(self)
+        recipient_row.addWidget(button("Scan QR", self.recipient_scanner.scan))
+        self.recipient_scanner.decoded.connect(self._recipient_scanned)
+        self.recipient_scanner.failed.connect(lambda message: QMessageBox.warning(self, "QR scanner", message))
+        form.addRow("Recipient", recipient_row)
+        self.send_amount = QLineEdit()
+        self.send_amount.setToolTip("Amount in BTC, with up to 8 decimal places. Core calculates the final fee and change.")
+        self.send_amount.setPlaceholderText("0.00000000")
+        form.addRow("Amount · BTC", self.send_amount)
+        self.send_fee = QLineEdit("2")
+        self.send_fee.setToolTip("Fee rate in satoshis per virtual byte. Core performs coin selection and fee calculation.")
+        form.addRow("Fee rate · sat/vB", self.send_fee)
+        page.addWidget(panel)
+        page.addStretch()
+        page.addWidget(button("Review transaction", self._create_psbt, True), 0, Qt.AlignmentFlag.AlignRight)
+
+    def _recipient_scanned(self, text):
+        if text.lower().startswith("bitcoin:"):
+            uri = urlsplit(text)
+            fields = parse_qs(uri.query)
+            if any(key.startswith("req-") for key in fields):
+                QMessageBox.warning(self, "Unsupported payment request", "This QR requires additional payment fields.")
+                return
+            self.send_recipient.setText(uri.path)
+            if fields.get("amount"):
+                self.send_amount.setText(fields["amount"][0])
+        else:
+            self.send_recipient.setText(text)
+
+    def _create_psbt(self):
+        if not self.service or not self.wallet_picker.currentText():
+            return
+        service, wallet = self.service, self.wallet_picker.currentText()
+        recipient, amount, fee = self.send_recipient.text().strip(), self.send_amount.text(), self.send_fee.text()
+        self.task("Core is funding the transaction…", lambda: service.create_psbt(wallet, recipient, amount, fee),
+                  lambda result: self._review_transaction(result["decoded"]["tx"], "Review unsigned transaction",
+                    "Export unsigned PSBT", lambda: self._export_psbt(result["psbt"]),
+                    fee=result.get("fee"), change=result.get("changepos")))
+
+    def _review_transaction(self, transaction, title, action, callback, *, fee=None, change=None, allowed=True):
+        dialog, layout = self._dialog(title, "Check every output before continuing.", size=(940, 710), online=True)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        outputs = QVBoxLayout(body)
+        for index, output in enumerate(transaction.get("vout", [])):
+            script = output.get("scriptPubKey", {})
+            address = script.get("address") or script.get("hex") or "Unknown script"
+            card = QFrame()
+            card.setObjectName("FormPanel")
+            row = QVBoxLayout(card)
+            row.addWidget(label(("Change" if index == change else "Output " + str(index + 1)) + " · " + btc(output["value"]) + " BTC", "Heading"))
+            full = label(address)
+            full.setWordWrap(True)
+            full.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            row.addWidget(full)
+            outputs.addWidget(card)
+        if fee is not None:
+            outputs.addWidget(label("Fee · " + btc(fee) + " BTC", "Heading"))
+        detail = QPlainTextEdit(json.dumps(transaction, indent=2, default=str))
+        detail.setReadOnly(True)
+        detail.hide()
+        details = QCheckBox("Show Core details")
+        details.toggled.connect(detail.setVisible)
+        outputs.addWidget(details)
+        outputs.addWidget(detail)
+        outputs.addStretch()
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+        if not allowed:
+            layout.addWidget(label("Core rejected this transaction for the mempool. Check the details before retrying.", "InfoStrip"))
+        footer = QHBoxLayout()
+        footer.addWidget(button("Cancel", dialog.reject))
+        footer.addStretch()
+        def proceed():
+            dialog.accept()
+            callback()
+        proceed_button = button(action, proceed, True)
+        proceed_button.setEnabled(allowed)
+        footer.addWidget(proceed_button)
+        layout.addLayout(footer)
+        self._dialog_help(dialog)
+        dialog.exec()
+
+    def _export_psbt(self, psbt):
+        dialog, layout = self._dialog("Unsigned PSBT", "Scan with your cold signer, or save to a file.", size=(820, 740), online=True)
+        qr = QLabel()
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        try:
+            qr.setPixmap(self._qr_pixmap(psbt, size=440))
+        except (ValueError, OverflowError, DataOverflowError):
+            qr.setText("This PSBT is too large for one QR. Save the file instead.")
+        layout.addWidget(qr, 1)
+        text = QPlainTextEdit(psbt)
+        text.setReadOnly(True)
+        text.setMaximumHeight(95)
+        layout.addWidget(text)
+        def save():
+            path, _ = QFileDialog.getSaveFileName(dialog, "Save unsigned PSBT", "unsigned.psbt", "PSBT files (*.psbt)")
+            if path:
+                try:
+                    Path(path).write_bytes(base64.b64decode(psbt, validate=True))
+                except (OSError, ValueError) as exc:
+                    QMessageBox.warning(dialog, "Could not save PSBT", str(exc))
+        footer = QHBoxLayout()
+        footer.addWidget(button("Save PSBT…", save))
+        footer.addStretch()
+        footer.addWidget(button("Done", dialog.accept, True))
+        layout.addLayout(footer)
+        self._dialog_help(dialog)
+        dialog.exec()
+
+    def _import_psbt_dialog(self):
+        if not self.service or not self.wallet_picker.currentText():
+            return
+        dialog, layout = self._dialog("Import PSBT", "Review the signed transaction before broadcasting.", size=(820, 560), online=True)
+        text = QPlainTextEdit()
+        text.setPlaceholderText("Scan, paste, or load the signed PSBT")
+        text.setToolTip("A signed PSBT from your signer. Importing only asks Core to finalize and check it; broadcasting requires a separate approval.")
+        layout.addWidget(text, 1)
+        scanner = QRScanner(dialog)
+        scanner.decoded.connect(text.setPlainText)
+        scanner.failed.connect(lambda message: QMessageBox.warning(dialog, "QR scanner", message))
+        def load():
+            path, _ = QFileDialog.getOpenFileName(dialog, "Open PSBT", "", "PSBT files (*.psbt);;All files (*)")
+            if not path:
+                return
+            try:
+                with Path(path).open("rb") as stream:
+                    data = stream.read(2 * 1024 * 1024 + 1)
+                if len(data) > 2 * 1024 * 1024:
+                    raise ValueError("PSBT exceeds the 2 MiB limit.")
+                text.setPlainText(base64.b64encode(data).decode() if data.startswith(b"psbt\xff") else data.decode("ascii").strip())
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(dialog, "Could not load PSBT", str(exc))
+        row = QHBoxLayout()
+        row.addWidget(button("Scan QR", scanner.scan))
+        row.addWidget(button("Load file…", load))
+        row.addStretch()
+        layout.addLayout(row)
+        def review():
+            psbt = text.toPlainText().strip()
+            if not psbt or len(psbt) > 2 * 1024 * 1024:
+                QMessageBox.warning(dialog, "PSBT required", "Load a PSBT smaller than 2 MiB.")
+                return
+            service, wallet = self.service, self.wallet_picker.currentText()
+            scanner.stop()
+            dialog.accept()
+            self.task("Core is checking the signed PSBT…", lambda: service.finalize_psbt(wallet, psbt), self._review_finalized)
+        footer = QHBoxLayout()
+        footer.addWidget(button("Back", dialog.reject))
+        footer.addStretch()
+        footer.addWidget(button("Review transaction", review, True))
+        layout.addLayout(footer)
+        self._dialog_help(dialog)
+        dialog.exec()
+        scanner.stop()
+
+    def _review_finalized(self, result):
+        acceptance = result["acceptance"][0]
+        service = self.service
+        transaction_hex = result["hex"]
+        fee = acceptance.get("fees", {}).get("base")
+        self._review_transaction(result["transaction"], "Review signed transaction", "Broadcast transaction",
+            lambda: self.task("Broadcasting through Core…", lambda: service.broadcast(transaction_hex),
+                              lambda txid: (self.show_text("Transaction broadcast", txid), self.refresh())),
+            fee=fee, allowed=acceptance.get("allowed") is True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Bitcoin Core wallet companion")
     parser.add_argument("--version", action="version", version=f"Core Companion {__version__}")
@@ -1833,7 +2068,11 @@ def main(argv=None):
             help="development only: leave host networking enabled during cold signer sessions",
         )
     args = parser.parse_args(argv)
-    application = QApplication([])
+    application = QApplication(["core-companion"])
+    application.setApplicationName("Core Companion")
+    application.setOrganizationName("CoreCompanion")
+    application.setDesktopFileName("core-companion")
+    application.setWindowIcon(QIcon(str(Path(__file__).with_name("icon.svg"))))
     application.setStyle("Fusion")
     application.setQuitOnLastWindowClosed(True)
     if args.cold_helper:

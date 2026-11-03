@@ -171,3 +171,34 @@ privilege prompts and network/swap changes/restoration still need VM acceptance.
 
 - [Core getdescriptorinfo](https://bitcoincore.org/en/doc/32.0.0/rpc/util/getdescriptorinfo/): public normalization and the original input checksum.
 - [Core walletprocesspsbt](https://bitcoincore.org/en/doc/32.0.0/rpc/wallet/walletprocesspsbt/): signing, signature modes and finalization controls.
+
+## November 3 native app review update
+
+The previous RAM-only wallet lifetime described in historical notes is superseded.
+Completed cold wallets now use encrypted Core backups with atomic replacement,
+0600 permissions and a single-writer lock. Public metadata is separate and is
+not encrypted. Reopening restores a locked working copy in tmpfs. The entropy
+generator wallet remains disposable. Backup or close failure keeps the signer
+open for retry.
+
+The entropy domain is now v2: user input is exact UTF-8, including whitespace.
+The audit command contains only hex literals and reproduces the full SHA-256;
+the selected first 16/20/24/28/32 bytes are the BIP39 phrase entropy.
+
+Disposable real Core 32.1 checks cover encrypted backup/reopen, labels and
+address index continuity; receive/change multipath import/export; matching
+xpub/zpub addresses; watch-only funding; unsigned PSBTv0 export; the signed
+return, finalization and mempool check; and explicit broadcast. The broadcast
+exercise uses a disposable regtest node. No host networking or swap settings
+are changed by these harnesses. The production application stays on mainnet.
+
+Native UI fixture checks cover 12/24-word vertical confirmation order, the
+exact audit command with arbitrary UTF-8 and shell punctuation, default-hidden
+BIP39 fields, mandatory file encryption, the Send page, removed cold-signer
+online tool and LifeHash color/determinism. LifeHash passes its upstream RGB
+reference vector. These review scripts remain outside the application repo.
+
+This implementation work does not replace independent security review or a
+full Debian camera, desktop authorization and isolation acceptance pass.
+
+Additional checks exercise the actual Qt-to-Core save/switch/reopen path, preserved used labels, address removal without key loss, backup failure preventing close/switch, and reopening after a Core restart. Encrypted multisig reopening, rejection of plaintext backups and concurrent writers also pass. All main native pages fit 980×680 in both themes; a signed-transaction dialog opens without an implicit default broadcast button. Camera hardware and GNOME integration remain manual VM acceptance items.

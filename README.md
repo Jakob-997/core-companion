@@ -42,7 +42,7 @@ agent. NetworkManager installations also need `nmcli` and `busctl`.
   first; disabling swap on a low-memory machine can freeze the desktop.
 - **Online node (watch-only):** connect to a local Core or start the app-managed
   node. Import the public wallet from your signer to view balances and history
-  and generate receiving addresses. This mode has no private keys.
+  generate receiving addresses and create unsigned PSBTs. Import a signed PSBT, review its outputs, then explicitly approve broadcasting through Core. This mode has no private keys.
 
 The welcome screen downloads and verifies Core when needed. It requires three
 distinct valid signatures from eight pinned release-signing keys and verifies
@@ -61,29 +61,33 @@ cannot rescan discarded blocks when importing an older wallet.
 Create or recover an English 12, 15, 18, 21 or 24-word BIP39 phrase. New phrases
 default to 12 words, with all words confirmed. The requested entropy recipe
 combines a temporary wallet.dat SHA-256, 32 bytes of OS randomness and optional
-dice rolls. **Audit details**, collapsed by default, contains these secret
-inputs, one reproducible SHA-256 command, and the exact starting entropy.
+user text (dice rolls, coin flips or keyboard input). Input is encoded exactly as UTF-8. **Audit details**, collapsed by default, contains these secret
+inputs, one reproducible SHA-256 command, the full 256-bit result and the exact phrase entropy. Twelve words use the first 128 bits; 24 words use all 256. BIP39 later derives a 512-bit seed.
 That command uses only Python's standard library. Anyone with its inputs can
 recreate the phrase; inspect them only on a trusted offline computer.
 
-An optional BIP39 passphrase changes the derived wallet. The separate **Encrypt
-wallet** password protects only this session's temporary Core file. They are
-different secrets. Python and Qt cannot guarantee erasure of secret memory.
+BIP39 passphrases are hidden by default. Enable them in Settings only when needed; a passphrase changes the derived wallet. Wallet-file encryption is required for saved cold wallets and protects private keys in Core's backup. Labels and public descriptors remain readable. Python and Qt cannot guarantee erasure of secret memory.
 
 For multisig, prepare your signer and share its BIP87 account key before adding
 the other signers' keys and choosing a threshold. Core validates and imports
 the P2WSH policy. The wizard supports 2–20 signers. Export the completed public
-wallet as a QR or JSON backup; import that into the watch-only node.
+wallet as a single checksummed receive/change multipath descriptor (/<0;1>/*), in QR or text form. It can be imported by Sparrow or the online node.
 
-**Closing the cold signer deletes its wallet, saved addresses and labels.**
-Keep the recovery phrase, any BIP39 passphrase and address type. Multisig recovery
-also requires the complete public wallet policy and enough signers' private
-backups. A wallet encryption password alone cannot restore a wallet. The app
-prompts before closing a session that contains recovery material or a wallet.
+**Completed cold wallets are saved, including address labels and indices.**
+Core writes an encrypted backup under the application data directory:
+**~/.local/share/core-companion/cold-wallets/** (or XDG_DATA_HOME). Working copies
+remain in RAM; the entropy-source wallet is deleted immediately after hashing.
+Change wallet saves and unloads the current signer, then lets you open a saved
+wallet in the same helper window. The saved backup opens locked; signing needs
+the wallet encryption password. An exclusive file lock prevents concurrent
+signer sessions from overwriting backups.
+
+Keep the recovery phrase and complete public policy as an independent backup.
+Multisig recovery needs enough signers' private backups. Removing an address
+only hides it from the app list; it remains part of the Core wallet.
 
 Scan a receiving address to check ownership, or import a PSBT from a static QR,
-file or paste. Review every output and fee before signing. Core supplies the
-decoded data and signatures; Companion never finalizes or broadcasts. An
+file or paste. Review every output and fee before signing. Core supplies the decoded data and signatures. The cold signer never broadcasts; the online node can finalize and broadcast after explicit review. An
 offline signer cannot independently validate input amounts against the chain.
 Large public exports and PSBTs can be saved to files when one QR is insufficient.
 
@@ -92,6 +96,16 @@ swap/network settings are restored. Isolation is checked periodically and
 before private-key operations. This is a desktop precaution, not protection
 against a compromised OS. Forced termination or power loss can interrupt cleanup;
 a restart or manual restoration may be necessary.
+
+The online importer accepts multipath descriptors, receive/change pairs, native
+SegWit account xpubs and zpubs (plus nested SegWit ypubs). A bare xpub defaults
+to native SegWit; use a descriptor to specify another script type or key origin.
+Core validates descriptors, expands paths, derives addresses, funds PSBTs,
+checks signed transactions and broadcasts.
+
+Wallet recognition uses LifeHash v2 from Blockchain Commons' Python source,
+with its full original colors. Its input is the public multipath descriptor
+without its checksum. The code and provenance are in companion/vendor.
 
 ## Development
 

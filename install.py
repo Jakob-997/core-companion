@@ -54,7 +54,7 @@ def main():
             (applications / "core-companion.desktop").write_text(
                 "[Desktop Entry]\nType=Application\nName=Core Companion\n"
                 "Comment=Bitcoin Core wallet companion\n"
-                f'Exec="{executable}"\nIcon=dialog-password\nTerminal=false\n'
+                f'Exec="{executable}"\nIcon={root / "companion" / "icon.svg"}\nTerminal=false\nStartupWMClass=core-companion\n'
                 "Categories=Office;Finance;\nStartupNotify=true\n", encoding="utf-8",
             )
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:

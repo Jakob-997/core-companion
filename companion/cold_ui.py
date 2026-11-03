@@ -1,6 +1,7 @@
 """Short-lived Linux UI for creating or recovering a Core signing wallet."""
 
 import base64
+import hashlib
 import json
 import secrets
 import unicodedata
@@ -11,7 +12,7 @@ from urllib.parse import unquote, urlsplit
 from .qr import qr_pixmap
 from .scanner import QRScanner
 from qrcode.exceptions import DataOverflowError
-from PySide6.QtCore import Qt, QEvent, QTimer
+from PySide6.QtCore import Qt, QEvent, QTimer, QSettings
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QPlainTextEdit,
@@ -26,6 +27,7 @@ from .wallet import validate_wallet_name
 from .seed import (
     SeedError,
     entropy_from_sources,
+    entropy_material,
     final_word_candidates,
     phrase_from_entropy,
     validate_phrase,
@@ -84,6 +86,7 @@ def _clear_layout(layout):
 class ColdSignerDialog(QDialog):
     def __init__(self, bitcoind, session_id, parent=None, *, dev_keep_network=False):
         super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowSystemMenuHint | Qt.WindowType.WindowCloseButtonHint | Qt.WindowType.WindowMinMaxButtonsHint)
         self.setObjectName("ColdSigner")
         self.setWindowTitle("Core Companion — Cold storage")
         self.resize(1280, 850)
@@ -116,6 +119,7 @@ class ColdSignerDialog(QDialog):
         self.wallet_display_name = "Cold storage"
         self.wallet_fingerprint = ""
         self.address_records = []
+        self.hidden_addresses = []
         self.active_address = None
         self.help_targets = []
 
@@ -126,6 +130,8 @@ class ColdSignerDialog(QDialog):
         mark = LineIcon("bitcoin", "Mark", stroke_width=1.9, inset=4)
         mark.setFixedSize(34, 34)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.global_back = IconButton("back", "Back", self._go_back)
+        header.addWidget(self.global_back)
         header.addWidget(mark)
         brand = _label("Core Companion", False)
         brand.setObjectName("Brand")
@@ -142,6 +148,7 @@ class ColdSignerDialog(QDialog):
         header.addWidget(self.help_button)
         self.theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         header.addWidget(self.theme_button)
+        header.addWidget(IconButton("settings", "Settings", self._open_settings))
         root.addLayout(header)
         divider = QFrame()
         divider.setObjectName("HeaderDivider")
@@ -204,6 +211,12 @@ class ColdSignerDialog(QDialog):
         self.stack.setCurrentIndex(15)
         self._update_workflow(15)
         self._open_core(bitcoind)
+        self._refresh_saved_wallets()
+        self.stack.currentChanged.connect(self._page_changed)
+        for control in self.findChildren(QPushButton):
+            if control.text().startswith(("Back", "‹  Back")):
+                control.hide()
+        self.global_back.show()
 
     def _update_workflow(self, page):
         stages = {15: 0, 16: 0, 0: 0, 1: 1, 2: 1, 3: 1, 4: 1, 17: 2, 5: 3}
@@ -272,9 +285,9 @@ class ColdSignerDialog(QDialog):
         self.address_type_form = form
         self.address_type = ComboBox()
         for title, code in (
-            ("Native SegWit", "bech32"),
-            ("Taproot", "bech32m"),
-            ("Nested SegWit", "p2sh-segwit"),
+            ("Native SegWit (recommended)", "bech32"),
+            ("Taproot (experimental)", "bech32m"),
+            ("Nested SegWit (legacy compatibility)", "p2sh-segwit"),
             ("Legacy", "legacy"),
         ):
             self.address_type.addItem(title, code)
@@ -312,22 +325,25 @@ class ColdSignerDialog(QDialog):
         length_column.addWidget(length_caption)
         self.word_count = ComboBox()
         for count in (12, 15, 18, 21, 24):
-            self.word_count.addItem(f"{count} words", count)
+            self.word_count.addItem(f"{count} words" + (" (recommended)" if count == 12 else ""), count)
         length_caption.setBuddy(self.word_count)
         length_column.addWidget(self.word_count)
+        length_column.addWidget(_label("12 words: 128 bits · 24 words: 256 bits", True))
+        self.word_count.setToolTip("The full SHA-256 is 256 bits. Twelve words use its first 128 bits; 24 words use all 256. BIP39 then derives a 512-bit seed.")
         fields.addLayout(length_column, 1)
         dice_column = QVBoxLayout()
         dice_column.setSpacing(10)
-        dice_caption = _label("Dice rolls · optional")
+        dice_caption = _label("User entropy · optional")
         dice_caption.setObjectName("FieldLabel")
         dice_column.addWidget(dice_caption)
         self.dice = QLineEdit()
-        self.dice.setPlaceholderText("Enter rolls from 1 to 6")
+        self.dice.setMaxLength(4096)
+        self.dice.setPlaceholderText("Dice rolls, coin flips, or any text")
         dice_caption.setBuddy(self.dice)
         dice_column.addWidget(self.dice)
-        self.dice_count = _label("0 rolls entered", True)
+        self.dice_count = _label("0 bytes entered", True)
         self.dice.textChanged.connect(lambda text: self.dice_count.setText(
-            f"{sum(face in '123456' for face in text)} rolls entered"
+            f"{len(text.encode('utf-8'))} bytes entered"
         ))
         dice_column.addWidget(self.dice_count)
         fields.addLayout(dice_column, 3)
@@ -578,7 +594,7 @@ class ColdSignerDialog(QDialog):
         rule.setFixedHeight(1)
         identity_row.addWidget(rule)
         change = IconButton("switch", "Change wallet", self._change_wallet)
-        change.setToolTip("Close this temporary signer session before opening another wallet.")
+        change.setToolTip("Save this wallet and choose another saved or new wallet.")
         identity_row.addWidget(change, 0, Qt.AlignmentFlag.AlignLeft)
         workspace.addWidget(identity, 1)
 
@@ -668,7 +684,7 @@ class ColdSignerDialog(QDialog):
         layout.addLayout(header)
         layout.addWidget(_label("Addresses generated or confirmed on this signer.", True))
         self.address_table = EmptyTable(0, 3, empty_title="No saved addresses", empty_hint="Generate an address or verify one from your online node.")
-        self.address_table.setHorizontalHeaderLabels(["LABEL", "ADDRESS", "SAVED"])
+        self.address_table.setHorizontalHeaderLabels(["LABEL", "ADDRESS", "USED"])
         self.address_table.verticalHeader().hide()
         self.address_table.verticalHeader().setDefaultSectionSize(48)
         self.address_table.setAlternatingRowColors(True)
@@ -676,9 +692,11 @@ class ColdSignerDialog(QDialog):
         self.address_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.address_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.address_table.setShowGrid(False)
-        self.address_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.address_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.address_table.setColumnWidth(0, 220)
         self.address_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.address_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.address_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.address_table.setColumnWidth(2, 84)
         self.address_table.cellActivated.connect(self._open_address_from_row)
         layout.addWidget(self.address_table, 1)
         layout.addWidget(_label("Double-click an address to view its QR code or edit its label.", True))
@@ -716,6 +734,10 @@ class ColdSignerDialog(QDialog):
         fields.addWidget(self.address_detail_label)
         self.address_used_status = _label("Saved on this signer", True)
         fields.addWidget(self.address_used_status)
+        self.address_used_check = QCheckBox("Mark as used")
+        self.address_used_check.setToolTip("Record that you used this address. The offline signer cannot check blockchain activity.")
+        self.address_used_check.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
+        fields.addWidget(self.address_used_check)
         fields.addStretch()
         detail.addLayout(fields, 1)
         layout.addLayout(detail)
@@ -723,14 +745,20 @@ class ColdSignerDialog(QDialog):
         done = QPushButton("Done")
         done.setObjectName("Primary")
         done.clicked.connect(self._save_address_detail)
-        layout.addWidget(done, 0, Qt.AlignmentFlag.AlignRight)
+        footer = QHBoxLayout()
+        remove = QPushButton("Remove address")
+        remove.clicked.connect(self._remove_address)
+        footer.addWidget(remove)
+        footer.addStretch()
+        footer.addWidget(done)
+        layout.addLayout(footer)
 
     def _build_tools_page(self):
         layout = self._card()
         self._add_back_heading(layout, "Tools & Settings", "Wallet policy, exports, and preferences.", 6)
         actions = QVBoxLayout()
         actions.setSpacing(9)
-        policy = ActionRow("⌘", "Wallet policy", "", tooltip="Review the wallet identity, signer keys, and public descriptors.")
+        policy = ActionRow("⌘", "Wallet info", "", tooltip="Review the wallet identity, signer keys, and public descriptors.")
         policy.clicked.connect(lambda: self.stack.setCurrentIndex(13))
         export = ActionRow(
             "⇧", "Export watch-only wallet", "",
@@ -738,7 +766,7 @@ class ColdSignerDialog(QDialog):
         )
         export.clicked.connect(self._export_watchonly_wallet)
         settings = ActionRow("⚙", "Settings", "", tooltip="Change appearance and view cold-signer session details.")
-        settings.clicked.connect(lambda: self.stack.setCurrentIndex(14))
+        settings.clicked.connect(self._open_settings)
         for action in (policy, export, settings):
             actions.addWidget(action)
         layout.addLayout(actions)
@@ -746,12 +774,13 @@ class ColdSignerDialog(QDialog):
 
     def _build_policy_page(self):
         layout = self._card(scroll=True, surface=False)
-        self._add_back_heading(layout, "Wallet policy", "Public wallet data supplied and checked by Bitcoin Core.", 12)
+        self._add_back_heading(layout, "Wallet info", "Public wallet data supplied and checked by Bitcoin Core.", 12)
         self.policy_identity = _label("")
         self.policy_identity.setObjectName("Value")
         identity = _panel(layout, "Wallet identity")
         identity.addWidget(self.policy_identity)
         signers = _panel(layout, "Signers")
+        self.signers_panel = signers.parentWidget()
         self.signer_map = QPlainTextEdit()
         self.signer_map.setReadOnly(True)
         self.signer_map.setAccessibleName("Wallet signers")
@@ -766,6 +795,9 @@ class ColdSignerDialog(QDialog):
         self.descriptors.setFont(fixed_font(11))
         self.descriptors.setMinimumHeight(150)
         descriptors.addWidget(self.descriptors)
+        show_qr = QPushButton("Show as QR")
+        show_qr.clicked.connect(self._export_watchonly_wallet)
+        descriptors.addWidget(show_qr, 0, Qt.AlignmentFlag.AlignLeft)
 
     def _build_settings_page(self):
         layout = self._card(surface=False)
@@ -779,24 +811,38 @@ class ColdSignerDialog(QDialog):
         self.settings_theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         appearance.addWidget(self.settings_theme_button)
         appearance_panel.addLayout(appearance)
-        session = _panel(layout, "Cold signer session")
+        session = _panel(layout, "Cold signer mode enabled")
         self.session_details = _label(
             "Swap and Core peer networking are disabled. Host networking stays on in development mode."
             if self.dev_keep_network else "Networking and swap are disabled for this session.", True
         )
         session.addWidget(self.session_details)
-        session.addWidget(_label("Core holds this wallet in RAM. Closing the session removes its temporary files.", True))
+        advanced = QCheckBox("Enable BIP39 passphrases (advanced)")
+        advanced.setToolTip("Adds an optional BIP39 passphrase to setup and recovery. Each passphrase creates a different wallet; wallet-file encryption is separate.")
+        advanced.setChecked(QSettings("CoreCompanion", "CoreCompanion").value("bip39_enabled", False, type=bool))
+        advanced.toggled.connect(self._set_advanced_bip39)
+        session.addWidget(advanced)
+        session.addWidget(_label("The encrypted wallet and labels are saved on this computer. Only working copies and the entropy-source wallet are temporary.", True))
         layout.addStretch()
 
     def _build_setup_page(self):
         layout = self._page()
         _heading(layout, "GET STARTED", "Wallet setup")
+        saved = QHBoxLayout()
+        saved.addWidget(_label("Saved wallets"))
+        self.saved_wallets = ComboBox()
+        self.saved_wallets.setToolTip("Open an encrypted wallet previously saved on this computer.")
+        saved.addWidget(self.saved_wallets, 1)
+        self.open_saved_button = QPushButton("Open wallet")
+        self.open_saved_button.clicked.connect(self._open_saved_wallet)
+        saved.addWidget(self.open_saved_button)
+        layout.addLayout(saved)
         choices = QHBoxLayout()
         choices.setSpacing(20)
         self.create_choice = ChoiceRow("new", "Create a new wallet", accent="blue", card=True,
                                        tooltip="Generate a new BIP39 recovery phrase for this cold signer.")
         self.create_choice.clicked.connect(lambda: self._choose_setup("new"))
-        self.recover_choice = ChoiceRow("import", "Use an existing wallet", accent="blue", card=True,
+        self.recover_choice = ChoiceRow("import", "Recover from phrase", accent="blue", card=True,
                                         tooltip="Recover a wallet from your existing English BIP39 recovery phrase.")
         self.recover_choice.clicked.connect(lambda: self._choose_setup("recover"))
         choices.addWidget(self.create_choice)
@@ -850,10 +896,12 @@ class ColdSignerDialog(QDialog):
 
     def _build_protection_page(self):
         layout = self._card(scroll=True, surface=False)
-        _heading(layout, "OPTIONAL PROTECTION", "Protect your wallet")
+        _heading(layout, "WALLET PROTECTION", "Protect your wallet")
         columns = QHBoxLayout()
         columns.setSpacing(20)
         content = _panel(columns, "Recovery protection", "A BIP39 passphrase creates a different wallet.")
+        self.bip39_panel = content.parentWidget()
+        self.bip39_panel.setVisible(QSettings("CoreCompanion", "CoreCompanion").value("bip39_enabled", False, type=bool))
         self.use_bip39_passphrase = QCheckBox("Use a BIP39 passphrase")
         self.use_bip39_passphrase.setToolTip("An additional secret that creates a different wallet from the same recovery phrase.")
         content.addWidget(self.use_bip39_passphrase)
@@ -872,10 +920,13 @@ class ColdSignerDialog(QDialog):
         self._toggle_bip39_fields(False)
 
         content.addStretch()
-        content = _panel(columns, "Session protection", "A password encrypts this session’s temporary wallet file.")
+        content = _panel(columns, "Wallet-file encryption", "Core saves this wallet encrypted on this computer.")
         self.encrypt_wallet = QCheckBox("Encrypt wallet")
-        self.encrypt_wallet.setToolTip("Encrypt the temporary Bitcoin Core wallet file for this session.")
+        self.encrypt_wallet.setToolTip("Core encrypts the saved wallet. A password is required before private keys can be written to disk. Labels and public descriptors remain readable.")
+        self.encrypt_wallet.setChecked(True)
+        self.encrypt_wallet.setEnabled(False)
         content.addWidget(self.encrypt_wallet)
+        self.encrypt_wallet.hide()
         self.wallet_password1 = QLineEdit()
         self.wallet_password1.setPlaceholderText("Password")
         self.wallet_password1.setEchoMode(QLineEdit.EchoMode.Password)
@@ -888,7 +939,7 @@ class ColdSignerDialog(QDialog):
         content.addWidget(self.wallet_show)
         self.encrypt_wallet.toggled.connect(self._toggle_wallet_fields)
         self.wallet_show.toggled.connect(self._toggle_wallet_visibility)
-        self._toggle_wallet_fields(False)
+        self._toggle_wallet_fields(True)
         content.addStretch()
         layout.addLayout(columns)
         layout.addStretch()
@@ -953,21 +1004,12 @@ class ColdSignerDialog(QDialog):
             self._create_single_signature()
 
     def _add_back_button(self, layout, target, text):
-        back = QPushButton("‹  " + text)
-        back.setObjectName("Quiet")
-        back.clicked.connect(lambda: self.stack.setCurrentIndex(target))
-        layout.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+        pass  # Navigation stays in the fixed header.
 
     def _add_back_heading(self, layout, title, description, target):
-        row = QHBoxLayout()
-        back = IconButton("back", "Back", lambda: self.stack.setCurrentIndex(target), tooltip="Return to the previous wallet screen.")
-        back.installEventFilter(self)
-        row.addWidget(back)
-        row.addSpacing(8)
-        heading = _label(title, False)
-        heading.setObjectName("CompactTitle")
-        row.addWidget(heading, 1)
-        layout.addLayout(row)
+        heading = _label(title)
+        heading.setObjectName("Title")
+        layout.addWidget(heading)
         if description:
             layout.addWidget(_label(description, True))
 
@@ -975,8 +1017,8 @@ class ColdSignerDialog(QDialog):
         fields = {
             self.wallet_name_input: "A name for this wallet in the interface and public backup. It does not change the keys.",
             self.address_type: "Choose the address format. Keep this choice with your recovery backup to recreate the same wallet.",
-            self.dice: "Optional: enter dice faces from 1 to 6 in order. They are mixed with the computer randomness and wallet-file hash.",
-            self.word_count: "Choose the length of the new recovery phrase. Write down every word in order.",
+            self.dice: "Optional dice rolls, coin flips or arbitrary text. Exact UTF-8 bytes, including spaces, are mixed with OS randomness and the wallet-file hash.",
+            self.word_count: "12 words encode 128 bits; 24 encode 256 bits. The full SHA-256 is always shown in Audit details. BIP39 later derives a 512-bit seed.",
             self.entropy_audit: "Secret source values, the exact SHA-256 command, and the resulting entropy. These values can recreate your recovery phrase.",
             self.recovery_count: "Choose the number of words on your existing recovery backup.",
             self.recovery_text: "Enter your existing recovery words in order. This offline signer checks their BIP39 checksum.",
@@ -984,19 +1026,19 @@ class ColdSignerDialog(QDialog):
             self.threshold: "The number of different signers required to authorize a transaction.",
             self.own_signer_name: "A short label for this device or signer, so you can distinguish it from the other signers.",
             self.address_detail_value: "The complete receiving address generated or checked by Bitcoin Core. Compare every character when verifying it elsewhere.",
-            self.address_detail_label: "An optional note for this address. It is kept only for the current cold session.",
+            self.address_detail_label: "An optional label saved with your encrypted Core wallet.",
             self.descriptors: "Public receive and change descriptors checked by Core. Multisig recovery needs this policy as well as the required private keys.",
             self.bip39_passphrase1: "An extra secret used with the recovery phrase. A different passphrase produces a different wallet; there is no wrong-passphrase warning.",
             self.bip39_passphrase2: "Enter the BIP39 passphrase again to check for typing mistakes.",
-            self.wallet_password1: "Encrypt the temporary Core wallet file with a password of at least 10 characters. This is separate from a BIP39 passphrase.",
+            self.wallet_password1: "Encrypt the saved Core private keys with a password of at least 10 characters. This is separate from a BIP39 passphrase.",
             self.wallet_password2: "Enter the wallet-file password again to check for typing mistakes.",
             self.scan_payload: "Paste a Bitcoin address, payment QR text, or base64 PSBT. Continue detects which type it is.",
             self.psbt_input: "A partially signed Bitcoin transaction from your online wallet. Core reviews its contents before signing is enabled.",
             self.psbt_review: "Check every recipient, amount, fee, and change output. The offline signer cannot check these against a local blockchain.",
-            self.signer_password: "The password that encrypts this session’s Core wallet file. It is cleared after each signing attempt.",
+            self.signer_password: "The saved Core wallet encryption password. It is cleared from this field after each signing attempt.",
             self.signed_psbt: "The transaction with this signer’s signatures. Transfer it to the other signers or your online wallet; it has not been broadcast.",
             self.verify_address_input: "Enter a Bitcoin address or bitcoin: payment URI. Core checks whether the address belongs to this wallet.",
-            self.verified_address_label: "An optional note saved after Core verifies the address. It lasts only for this cold session.",
+            self.verified_address_label: "An optional label saved after Core verifies the address.",
             self.theme_button: "Switch between light and dark appearance.",
             self.settings_theme_button: "Switch between light and dark appearance.",
             self.create_choice: "Create a new recovery phrase for this signer.",
@@ -1004,15 +1046,15 @@ class ColdSignerDialog(QDialog):
             self.single_choice: "One private key is enough to sign for this wallet.",
             self.multi_choice: "Several signers share a wallet. You choose how many signatures a transaction needs.",
             self.bip39_show: "Show or hide the BIP39 passphrase while you enter it.",
-            self.wallet_show: "Show or hide the temporary wallet-file password while you enter it.",
+            self.wallet_show: "Show or hide the wallet-file encryption password while you enter it.",
             self.show_signer_password: "Show or hide the wallet password before signing.",
-            self.address_table: "Double-click a saved address to view its QR or edit its label. This list lasts only for the current cold session.",
+            self.address_table: "Open an address to view its QR, edit its saved label, mark it used or remove it from this list.",
         }
         for widget, explanation in fields.items():
             widget.setToolTip(explanation)
         descriptions = {
-            "Generate recovery phrase": "Generate a recovery phrase from Bitcoin Core wallet data, Linux randomness, and optional dice rolls.",
-            "Generate address": "Ask Core for a fresh receiving address and save it in this session’s address list.",
+            "Generate recovery phrase": "Generate a recovery phrase from Bitcoin Core wallet data, Linux randomness, and optional user entropy.",
+            "Generate address": "Ask Core for a fresh receiving address and save its derivation index and label.",
             "I wrote it down": "Hide the phrase and check that you can retype every word from your backup.",
             "Skip confirmation (testing)": "Development only: continue without checking your written recovery phrase. Use test wallets only.",
             "+ Add signer": "Add another signer to the multisig policy. This flow supports up to 20 signers.",
@@ -1348,7 +1390,7 @@ class ColdSignerDialog(QDialog):
     def _read_protection_options(self):
         bip39_passphrase = ""
         wallet_password = ""
-        if self.use_bip39_passphrase.isChecked():
+        if self.bip39_panel.isVisible() and self.use_bip39_passphrase.isChecked():
             first, second = self.bip39_passphrase1.text(), self.bip39_passphrase2.text()
             if not first or (self.phrase_source != "recover" and first != second):
                 message = "Enter your BIP39 passphrase." if self.phrase_source == "recover" else "Enter the same non-empty BIP39 passphrase twice."
@@ -1369,7 +1411,7 @@ class ColdSignerDialog(QDialog):
         self.current_bip39_passphrase = ""
         self.current_wallet_passphrase = ""
         self.use_bip39_passphrase.setChecked(False)
-        self.encrypt_wallet.setChecked(False)
+        self.encrypt_wallet.setChecked(True)
         self.bip39_show.setChecked(False)
         self.wallet_show.setChecked(False)
         for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):
@@ -1412,30 +1454,30 @@ class ColdSignerDialog(QDialog):
         if self.wallet_digest is None or self.os_entropy is None:
             self.entropy_audit.clear()
             return
-        dice = "".join(self.dice.text().split())
-        count = int(self.word_count.currentData())
+        user = self.dice.text()
+        size = int(self.word_count.currentData()) * 4 // 3
         try:
-            digest = entropy_from_sources(self.wallet_digest, 24, dice, os_entropy=self.os_entropy)
+            material = entropy_material(self.wallet_digest, self.os_entropy, user)
         except SeedError as exc:
             self.entropy_audit.setPlainText(str(exc))
             return
-        size = count * 4 // 3
-        command = (
-            'python3 -c "from hashlib import sha256; '
-            f"rng=bytes.fromhex('{self.os_entropy.hex()}'); "
-            f"wallet=bytes.fromhex('{self.wallet_digest.hex()}'); dice=b'{dice}'; "
-            "data=(b'Core Companion BIP39 entropy v1\\x00'"
-            "+len(wallet).to_bytes(2,'big')+wallet"
-            "+len(rng).to_bytes(2,'big')+rng"
-            "+len(dice).to_bytes(4,'big')+dice); "
-            f"print(sha256(data).digest()[:{size}].hex())" + '"'
-        )
+        digest = hashlib.sha256(material).digest()
+        # Hex-only literals make this command safe to paste with arbitrary user text.
+        command = ('python3 -c "from hashlib import sha256; '
+                   f"wallet=bytes.fromhex('{self.wallet_digest.hex()}'); "
+                   f"rng=bytes.fromhex('{self.os_entropy.hex()}'); "
+                   f"user=bytes.fromhex('{user.encode('utf-8').hex()}'); "
+                   "data=(b'Core Companion BIP39 entropy v2\\x00'"
+                   "+len(wallet).to_bytes(2,'big')+wallet"
+                   "+len(rng).to_bytes(2,'big')+rng"
+                   "+len(user).to_bytes(4,'big')+user); print(sha256(data).hexdigest())" + '"')
         self.entropy_audit.setPlainText(
             f"OS RNG (hex): {self.os_entropy.hex()}\n"
             f"Wallet.dat SHA-256: {self.wallet_digest.hex()}\n"
-            f"Dice rolls: {dice or '(none)'}\n\n"
-            "SHA-256 command:\n" + command + "\n\n"
-            f"Starting entropy ({size * 8} bits): {digest[:size].hex()}"
+            f"User entropy (UTF-8 hex): {user.encode('utf-8').hex() or '(none)'}\n\n"
+            f"Reproduce SHA-256:\n{command}\n\n"
+            f"Full SHA-256 (256 bits): {digest.hex()}\n"
+            f"BIP39 phrase entropy ({size * 8} bits, first {size} bytes): {digest[:size].hex()}"
         )
 
     def _generate_phrase(self):
@@ -1450,7 +1492,7 @@ class ColdSignerDialog(QDialog):
             )
             self.phrase = phrase_from_entropy(entropy)
         except SeedError as exc:
-            QMessageBox.warning(self, "Check the dice rolls", str(exc))
+            QMessageBox.warning(self, "Check user entropy", str(exc))
             return
         self.words = self.phrase.split()
         self.phrase_source = "create"
@@ -1537,7 +1579,9 @@ class ColdSignerDialog(QDialog):
             field.setPlaceholderText(f"Word {index + 1}")
             field.setToolTip(f"Enter word {index + 1} from your written backup, keeping the original order.")
             field.installEventFilter(self)
-            self.challenge_form.addWidget(field, index // 3, index % 3)
+            columns = 4 if len(self.words) > 18 else 3
+            rows = (len(self.words) + columns - 1) // columns
+            self.challenge_form.addWidget(field, index % rows, index // rows)
             self.challenge_fields.append(field)
         for item in self.word_labels:
             item.clear()
@@ -1701,7 +1745,7 @@ class ColdSignerDialog(QDialog):
         self.wallet_encrypted = result.get("encrypted") is True
         self.signer_password.setEnabled(self.wallet_encrypted)
         self.show_signer_password.setEnabled(self.wallet_encrypted)
-        self.descriptors.setPlainText("\n".join(result["descriptors"]))
+        self.descriptors.setPlainText(self.core.public_descriptor(result["descriptors"]))
         self.wallet_display_name = self.wallet_name_input.text().strip() or "Cold signer"
         self.setWindowTitle(f"Core Companion — {self.wallet_display_name}")
         self.wallet_fingerprint = str(result.get("address_info", {}).get("hdmasterfingerprint", "")).upper()
@@ -1733,13 +1777,37 @@ class ColdSignerDialog(QDialog):
             signer_text += "\n\nYour BIP87 account key\n" + own_key
         self.signer_map.setPlainText(signer_text)
         self.wallet_type_summary = wallet_type
+        self.signers_panel.setVisible(bool(result.get("signers")))
+        self.wallet_result = result
+        self._persist_current_wallet()
         self.stack.setCurrentIndex(6)
 
     def _update_identity_mark(self):
-        self.identity_mark.set_fingerprint(self.wallet_fingerprint)
+        self.identity_mark.set_identity(self.descriptors.toPlainText().split("#", 1)[0])
 
     def _change_wallet(self):
-        self._finish()
+        try:
+            if not self._persist_current_wallet():
+                return
+            self.core.unload_signer()
+        except (ColdSetupError, CoreError) as exc:
+            QMessageBox.critical(self, "Could not save wallet", str(exc))
+            return
+        self.wallet_ready = self.multisig_prepared = False
+        self.setWindowTitle("Core Companion — Cold storage")
+        self.status_left.setText("Cold signer · choose wallet")
+        self.status_right.setText("Saved wallets are encrypted")
+        self._clear_setup_secrets()
+        self.address_records = []
+        self.hidden_addresses = []
+        self.wallet_name_input.clear()
+        self.setup_choice = self.type_choice = None
+        for control in (self.create_choice, self.recover_choice, self.single_choice, self.multi_choice):
+            control.setChecked(False)
+        self.setup_continue.setEnabled(False)
+        self.type_continue.setEnabled(False)
+        self._refresh_saved_wallets()
+        self.stack.setCurrentIndex(15)
 
     def _toggle_help_mode(self):
         self.help_mode = not self.help_mode
@@ -1786,6 +1854,12 @@ class ColdSignerDialog(QDialog):
             address_item = QTableWidgetItem(record["address"])
             address_item.setFont(fixed_font(9))
             used_item = QTableWidgetItem("✓" if record.get("used") else "—")
+            used_item.setToolTip("Manually marked used on this signer; not an on-chain balance check.")
+            used_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            font = used_item.font()
+            font.setPointSize(18)
+            font.setBold(True)
+            used_item.setFont(font)
             for item in (label_item, address_item, used_item):
                 item.setData(Qt.ItemDataRole.UserRole, record["address"])
             self.address_table.setItem(row, 0, label_item)
@@ -1800,9 +1874,10 @@ class ColdSignerDialog(QDialog):
         except ColdSetupError as exc:
             QMessageBox.warning(self, "Address generation failed", str(exc))
             return
-        record = {"address": result["address"], "label": "", "used": True}
+        record = {"address": result["address"], "label": "", "used": False}
         self.address_records = [item for item in self.address_records if item["address"] != record["address"]]
         self.address_records.insert(0, record)
+        self._persist_current_wallet()
         self._show_address_detail(record)
 
     def _open_address_from_row(self, row, _column):
@@ -1819,7 +1894,8 @@ class ColdSignerDialog(QDialog):
         self.address_detail_title.setText(record.get("label") or "Wallet address")
         self.address_detail_value.setText(record["address"])
         self.address_detail_label.setText(record.get("label", ""))
-        self.address_used_status.setText("Saved on this signer")
+        self.address_used_status.setText("Used" if record.get("used") else "Unused · not marked used")
+        self.address_used_check.setChecked(bool(record.get("used")))
         self.address_qr.setPixmap(self._qr_pixmap(record["address"], size=320))
         self.stack.setCurrentIndex(11)
 
@@ -1834,6 +1910,8 @@ class ColdSignerDialog(QDialog):
             QMessageBox.warning(self, "Could not save label", str(exc))
             return
         record["label"] = label
+        record["used"] = self.address_used_check.isChecked()
+        self._persist_current_wallet()
         self._open_addresses()
 
     def _save_verified_address(self):
@@ -1849,9 +1927,10 @@ class ColdSignerDialog(QDialog):
             return
         record = next((entry for entry in self.address_records if entry["address"] == address), None)
         if record is None:
-            record = {"address": address, "used": True}
+            record = {"address": address, "used": False}
             self.address_records.insert(0, record)
         record["label"] = label
+        self._persist_current_wallet()
         self.verify_address_input.clear()
         self.verified_address_label.clear()
         self.stack.setCurrentIndex(6)
@@ -2093,8 +2172,8 @@ class ColdSignerDialog(QDialog):
             QMessageBox.warning(self, "Could not save PSBT", str(exc))
 
     def _export_watchonly_wallet(self):
-        descriptors = self.descriptors.toPlainText().splitlines()
-        payload = json.dumps({"name": self.wallet_display_name, "descriptors": descriptors}, separators=(",", ":"))
+        self.export_return_index = self.stack.currentIndex()
+        payload = self.descriptors.toPlainText()
         try:
             pixmap = self._qr_pixmap(payload, size=480)
         except (ValueError, DataOverflowError):
@@ -2110,7 +2189,7 @@ class ColdSignerDialog(QDialog):
             self.export_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.export_qr.setWordWrap(True)
             content.addWidget(self.export_qr, 0, Qt.AlignmentFlag.AlignTop)
-            data_panel = _panel(content, "Public wallet backup", "Includes the wallet name and public descriptors. Keep it with your multisig backups.")
+            data_panel = _panel(content, "Public wallet backup", "One receive/change descriptor for Sparrow and other descriptor wallets.")
             self.export_text = QPlainTextEdit()
             self.export_text.setReadOnly(True)
             self.export_text.setFont(fixed_font(10))
@@ -2140,7 +2219,7 @@ class ColdSignerDialog(QDialog):
         self.stack.setCurrentIndex(self.export_page_index)
 
     def _save_watchonly_wallet(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save public wallet backup", "wallet-backup.json", "JSON files (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save public wallet backup", "wallet-descriptor.txt", "Text files (*.txt)")
         if not path:
             return
         try:
@@ -2149,22 +2228,14 @@ class ColdSignerDialog(QDialog):
             QMessageBox.warning(self, "Could not save wallet backup", str(exc))
 
     def _confirm_close(self):
-        if not (self.wallet_ready or self.multisig_prepared or self.phrase):
-            return True
-        message = "This session and its address labels will be removed from RAM. Keep your recovery phrase and any BIP39 passphrase."
-        if self.wallet_mode == "multisig":
-            message += ("\n\nMultisig recovery also needs the complete wallet policy. Save the public wallet backup before closing."
-                        if self.wallet_ready else "\n\nMultisig setup is unfinished. Your public signer key can be recreated from your phrase and passphrase.")
-        prompt = QMessageBox(QMessageBox.Icon.Warning, "Close cold signer?", message, parent=self)
-        prompt.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Close)
-        prompt.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        export = prompt.addButton("Export wallet", QMessageBox.ButtonRole.ActionRole) if self.wallet_ready else None
-        prompt.exec()
-        if export is not None and prompt.clickedButton() is export:
-            self._export_watchonly_wallet()
-            return False
-        clicked = prompt.clickedButton()
-        return clicked is not None and prompt.standardButton(clicked) == QMessageBox.StandardButton.Close
+        if self.wallet_ready:
+            return self._persist_current_wallet()
+        if self.multisig_prepared or self.phrase:
+            return QMessageBox.question(self, "Leave unfinished setup?",
+                "This unfinished setup has not been saved. Keep your recovery phrase before leaving.",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Close,
+                QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Close
+        return True
 
     _qr_pixmap = staticmethod(qr_pixmap)
 
@@ -2208,3 +2279,86 @@ class ColdSignerDialog(QDialog):
             event.ignore()
             return
         event.accept()
+
+    def _persist_current_wallet(self):
+        if not self.wallet_ready or self.core is None:
+            return True
+        try:
+            self.core.save_wallet({"name": self.wallet_display_name, "wallet_type": self.wallet_type_summary,
+                "address_type": self.core.address_type, "result": self.wallet_result,
+                "address_records": self.address_records, "hidden_addresses": self.hidden_addresses})
+        except (ColdSetupError, CoreError, OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Wallet not saved", str(exc))
+            return False
+        return True
+
+    def _refresh_saved_wallets(self):
+        self.saved_wallets.clear()
+        if self.core is not None:
+            try:
+                for wallet_id, name in self.core.store.list_wallets():
+                    self.saved_wallets.addItem(name, wallet_id)
+            except (OSError, ColdSetupError) as exc:
+                QMessageBox.warning(self, "Wallet storage unavailable", str(exc))
+        available = self.saved_wallets.count() > 0
+        self.open_saved_button.setEnabled(available)
+        self.saved_wallets.setEnabled(available)
+        if not available:
+            self.saved_wallets.addItem("No saved wallets", None)
+
+    def _open_saved_wallet(self):
+        wallet_id = self.saved_wallets.currentData()
+        if not wallet_id or self.core is None:
+            return
+        try:
+            metadata = self.core.open_saved_wallet(wallet_id)
+            self.wallet_name_input.setText(metadata["name"])
+            self.wallet_mode = "multisig" if metadata["result"].get("signers") else "single"
+            self.address_records = metadata.get("address_records", [])
+            self.hidden_addresses = metadata.get("hidden_addresses", [])
+            self._show_complete(metadata["result"], metadata["wallet_type"])
+        except (ColdSetupError, CoreError, KeyError, OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Could not open wallet", str(exc))
+
+    def _remove_address(self):
+        if not self.active_address:
+            return
+        answer = QMessageBox.question(self, "Remove address from list?",
+            "The address will remain part of your wallet and can still receive bitcoin.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.Cancel)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.hidden_addresses.append(self.active_address)
+            self.address_records = [r for r in self.address_records if r["address"] != self.active_address]
+            self._persist_current_wallet()
+            self._open_addresses()
+
+    def _set_advanced_bip39(self, enabled):
+        QSettings("CoreCompanion", "CoreCompanion").setValue("bip39_enabled", enabled)
+        if hasattr(self, "bip39_panel"):
+            self.bip39_panel.setVisible(enabled)
+            if not enabled:
+                self.use_bip39_passphrase.setChecked(False)
+
+    def _go_back(self):
+        page = self.stack.currentIndex()
+        if page == 15:
+            self._finish()
+        elif page == 4:
+            self._back_from_confirmation()
+        else:
+            targets = {0: 16, 1: 0, 2: 0, 3: 1, 5: 17, 7: 6, 8: 9, 9: 6,
+                       10: 6, 11: 10, 12: 6, 13: 12, 14: getattr(self, "settings_return_index", 12 if self.wallet_ready else 15),
+                       16: 15, 17: 2 if self.phrase_source == "recover" else 4}
+            self.stack.setCurrentIndex(targets.get(page, getattr(self, "export_return_index", 12)))
+
+    def _page_changed(self, page):
+        self.global_back.setVisible(page != 6)
+        if page == 9 and self.wallet_ready:
+            QTimer.singleShot(0, self._start_qr_scanner)
+        elif self.scanner is not None:
+            self._stop_scanner()
+
+    def _open_settings(self):
+        self.settings_return_index = self.stack.currentIndex()
+        self.stack.setCurrentIndex(14)

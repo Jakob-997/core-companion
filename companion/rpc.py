@@ -25,7 +25,8 @@ class CoreRPC:
         "getbalances", "listtransactions", "listreceivedbyaddress",
         "getnewaddress", "getaddressinfo", "decodepsbt", "analyzepsbt",
         "getdescriptorinfo", "createwallet", "importdescriptors",
-        "listdescriptors",
+        "listdescriptors", "setlabel", "validateaddress", "walletcreatefundedpsbt",
+        "finalizepsbt", "decoderawtransaction", "testmempoolaccept", "sendrawtransaction",
     })
 
     def __init__(self, port, cookie_path):

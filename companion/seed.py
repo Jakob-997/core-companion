@@ -17,7 +17,7 @@ from mnemonic import Mnemonic
 
 WORD_COUNTS = {12: 16, 15: 20, 18: 24, 21: 28, 24: 32}
 MAX_WALLET_BYTES = 256 * 1024 * 1024
-_DOMAIN = b"Core Companion BIP39 entropy v1\x00"
+_DOMAIN = b"Core Companion BIP39 entropy v2\x00"
 
 
 class SeedError(ValueError):
@@ -46,7 +46,7 @@ def hash_wallet_dat(path):
 
 
 def entropy_from_sources(wallet_digest, word_count=24, dice_rolls="", os_entropy=None):
-    """Mix wallet-file hash, Linux OS randomness, and optional 1–6 dice rolls.
+    """Mix wallet-file hash, Linux OS randomness, and optional UTF-8 user input.
 
     The OS contribution is always 32 bytes from Python's system CSPRNG. The
     digest is truncated only to a standard BIP39 entropy size, selected by word
@@ -64,12 +64,9 @@ def entropy_material(wallet_digest, os_entropy, dice_rolls=""):
     """The exact bytes hashed for generation and displayed for reproduction."""
     if any(not isinstance(value, bytes) or len(value) != 32 for value in (wallet_digest, os_entropy)):
         raise SeedError("Wallet hash and OS randomness must each be 32 bytes.")
-    dice = "".join(str(dice_rolls).split())
-    if any(face not in "123456" for face in dice):
-        raise SeedError("Dice input may contain only rolls from 1 to 6.")
-    if len(dice) > 4096:
-        raise SeedError("Dice input is too long.")
-    dice_bytes = dice.encode("ascii")
+    dice_bytes = str(dice_rolls).encode("utf-8")
+    if len(dice_bytes) > 4096:
+        raise SeedError("User entropy input must be at most 4096 UTF-8 bytes.")
     return (
         _DOMAIN
         + len(wallet_digest).to_bytes(2, "big") + wallet_digest

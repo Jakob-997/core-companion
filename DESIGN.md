@@ -37,9 +37,7 @@ The application uses native PySide6 Qt Widgets and the existing dependency lock.
 `companion/ui.py` contains the welcome and online layouts;
 `companion/cold_ui.py` contains the signer screens and review presentation.
 
-The branch makes no changes to the RPC client, wallet service, entropy recipe,
-Core download verification, offline Core implementation, host isolation,
-dependency lock, or installer.
+The November 3 review adds encrypted wallet persistence, UTF-8 user entropy, Core-validated multipath interchange, xpub/zpub import, the online PSBT send/return flow, native application branding and true LifeHash v2. Host isolation and Core download verification retain their existing behavior. No runtime package dependencies were added; the LifeHash source is vendored with its license and exact provenance.
 
 The final native Qt review rendered 140 screen states in light/dark modes at
 1280×850 and 980×680 on Windows and in the existing Linux WSL environment.
@@ -49,3 +47,5 @@ signing arguments, recovery-field clearing, help, and keyboard activation.
 The review reported no missing-help or horizontal-overflow warnings. These
 checks do not constitute a security audit or replace Debian host-isolation
 acceptance.
+
+Navigation now uses a fixed top-left Back control. Recovery confirmation keeps the same vertical ordering as the phrase view. Advanced BIP39 passphrases are enabled through Settings. Address-list removal preserves Core's keys and derivation history. The online action row is Receive, Send, Addresses, Tools; activity remains below it.

@@ -113,12 +113,12 @@ bounded, and a stale managed cookie no longer causes an endless reconnect loop.
    directory on a verified tmpfs mount.
 2. Create a throwaway descriptor wallet, unload it, and hash its closed
    `wallet.dat` with SHA-256.
-3. Before dice entry, obtain 32 fresh bytes from the Linux system CSPRNG. Display
+3. Before user entropy entry, obtain 32 fresh bytes from the Linux system CSPRNG. Display
    actual OS bytes and wallet-file hash in the collapsed secret Audit details.
    Retain those same original inputs in signer memory. On
-   Generate, combine those fixed inputs with the dice digits using the documented,
+   Generate, combine those fixed inputs with the exact UTF-8 user input using the documented,
    length-prefixed domain-separated SHA-256 in `seed.py`; no new randomness is
-   drawn after dice entry. Truncate only to the selected standard BIP39 size.
+   drawn after user entropy entry. Truncate only to the selected standard BIP39 size.
 4. Encode the entropy and validate/recover English BIP39 words with Trezor's
    `python-mnemonic`. `to_seed()` applies the optional BIP39 passphrase;
    `to_hd_master_key()` produces the BIP32 root xprv. Bitcoin Core imports that
@@ -134,13 +134,22 @@ bounded, and a stale managed cookie no longer causes an endless reconnect loop.
    strings from process memory. The helper isolation reduces exposure but does
    not make this a reviewed or production-secure signer.
 
-Before closing, the user can export the public receive/change descriptors and
-wallet name as a QR or JSON file. A closing prompt explains the temporary
-session and offers export. Core supplies the public descriptors; private descriptors
-are never used for this export. The online importer checks that both descriptors are
-public and solvable, creates a wallet with private keys disabled, and delegates
-import and historical scanning to Core. Pruned-away history cannot be recovered
-by this import without obtaining the missing blocks.
+Completed wallets require Core file encryption. Core backupwallet writes a
+consistent backup, permissions are set to 0600, and an atomic rename replaces
+the previous wallet.dat. Public metadata is saved separately with atomic writes
+and directory fsync. A held flock prevents simultaneous writers. The app backs
+up after setup, address generation, label/status changes and before switching
+or closing. On reopen it copies the encrypted backup into the private tmpfs
+wallet directory and asks Core to load it locked. The throwaway entropy wallet
+never enters this persistent storage.
+
+Public exports combine the exact receive/change pair into /<0;1>/* only after
+Core confirms expansion reproduces both original canonical descriptors. Core
+also supplies the checksum. QR/text export carries that plain descriptor.
+The importer accepts this form, pairs, xpubs, zpubs and ypubs. Only public-key
+version conversion is local; Base58Check is verified and Core validates and
+expands descriptors before wallet creation. Pruned-away history cannot be
+recovered by a rescan.
 
 BIP39's checksum does not always identify a unique final word. For a partial
 phrase, the recovery screen displays the checksum-valid candidates and asks the
@@ -189,3 +198,5 @@ termination, system-specific network management, Core RPC compatibility,
 descriptor interoperability, PSBT display and signing review, and packaging.
 Do not treat a small codebase or Core-backed operations as a substitute for an
 independent security review.
+
+The new storage.py owns atomic encrypted Core backups and a single-writer file lock. public_wallet.py owns public-key version conversion and Core-validated multipath interchange. The online send path delegates funding, decoding, finalization, mempool checks and explicitly approved broadcast to Core. PSBTv0 is requested for broad external-signer compatibility.
