@@ -2,7 +2,7 @@
 
 ## Live browser demo
 
-[Open the temporary desktop session](https://absence-instruction-expired-opens.trycloudflare.com/).
+[Open the temporary desktop session](https://homeland-swing-zoning-largely.trycloudflare.com/).
 
 This runs the Linux app in a shared browser session. The session password is shared separately. The link is temporary and the host session is scheduled to stop after two hours. Use disposable data only: recovery backup confirmation is skipped, Bitcoin Core peer networking is disabled, and node sync stays at 0%. Never enter a real recovery phrase, private key or wallet password.
 
