@@ -301,6 +301,36 @@ class ColdSignerDialog(QDialog):
         form.addRow("Address type", self.address_type)
         fields.addLayout(form, 1)
         details.addLayout(fields)
+        self.multisig_policy_panel = QFrame()
+        self.multisig_policy_panel.setObjectName("FormPanel")
+        policy_layout = QVBoxLayout(self.multisig_policy_panel)
+        policy_layout.setContentsMargins(22, 18, 22, 18)
+        policy_layout.setSpacing(10)
+        policy_title = _label("Multisig policy")
+        policy_title.setObjectName("FormTitle")
+        policy_layout.addWidget(policy_title)
+        policy_fields = QFormLayout()
+        policy_fields.setVerticalSpacing(10)
+        self.threshold = QSpinBox()
+        self.threshold.setButtonSymbols(QSpinBox.ButtonSymbols.PlusMinus)
+        self.threshold.setRange(1, 3)
+        self.threshold.setValue(2)
+        self.threshold.setMaximumWidth(150)
+        self.multisig_total = QSpinBox()
+        self.multisig_total.setButtonSymbols(QSpinBox.ButtonSymbols.PlusMinus)
+        self.multisig_total.setRange(2, 20)
+        self.multisig_total.setValue(3)
+        self.multisig_total.setMaximumWidth(150)
+        policy_fields.addRow("Required signatures (M)", self.threshold)
+        policy_fields.addRow("Total signers (N)", self.multisig_total)
+        policy_layout.addLayout(policy_fields)
+        self.signer_count_label = _label("2 of 3 signers must approve", True)
+        policy_layout.addWidget(self.signer_count_label)
+        self.multisig_policy_panel.hide()
+        layout.addWidget(self.multisig_policy_panel)
+        self.threshold.valueChanged.connect(self._sync_threshold)
+        self.multisig_total.valueChanged.connect(self._sync_threshold)
+        self._sync_threshold()
         layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("‹  Back")
@@ -514,7 +544,7 @@ class ColdSignerDialog(QDialog):
 
     def _build_multisig_page(self):
         layout = self._card(scroll=True, surface=False)
-        _heading(layout, "MULTISIG POLICY", "Bring your signers together", "Share your public key, then add each signer’s xpub and origin.")
+        _heading(layout, "MULTISIG POLICY", "Add your other signers", "Share your public key, then enter each signer’s label, xpub and origin.")
         own_panel = _panel(layout, "Your signer")
         own_key_row = QHBoxLayout()
         own_key_row.setSpacing(24)
@@ -537,19 +567,12 @@ class ColdSignerDialog(QDialog):
         own_key_fields.addStretch()
         own_key_row.addLayout(own_key_fields, 1)
         own_panel.addLayout(own_key_row)
-        self.threshold = QSpinBox()
-        self.threshold.setButtonSymbols(QSpinBox.ButtonSymbols.PlusMinus)
-        self.threshold.setMaximumWidth(160)
-        self.threshold.setMinimum(1)
-        self.threshold.setMaximum(3)
-        self.threshold.setValue(2)
-        self.signer_count_label = _label("3 signers total", True)
         self.own_signer_name = QLineEdit("This signer")
+        self.multisig_summary = _label(self.signer_count_label.text(), True)
         form = QFormLayout()
         form.setVerticalSpacing(12)
+        form.addRow("Policy", self.multisig_summary)
         form.addRow("This signer", self.own_signer_name)
-        form.addRow("Required signatures", self.threshold)
-        form.addRow("Signers", self.signer_count_label)
         own_panel.addLayout(form)
         signers_panel = _panel(layout, "Other signers")
         self.signer_grid = QGridLayout()
@@ -560,15 +583,6 @@ class ColdSignerDialog(QDialog):
         self.signer_fields = []
         for index in range(2):
             self._add_signer_fields(f"Signer {index + 2}")
-        signer_buttons = QHBoxLayout()
-        add_signer = QPushButton("+ Add signer")
-        add_signer.clicked.connect(self._add_signer)
-        signer_buttons.addWidget(add_signer)
-        remove_signer = QPushButton("− Remove last")
-        remove_signer.clicked.connect(self._remove_signer)
-        signer_buttons.addWidget(remove_signer)
-        signer_buttons.addStretch()
-        signers_panel.addLayout(signer_buttons)
         self.multisig_password = QLineEdit()
         self.multisig_password.setPlaceholderText("Wallet password to finish setup")
         self.multisig_password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -1027,6 +1041,7 @@ class ColdSignerDialog(QDialog):
         address_label = self.address_type_form.labelForField(self.address_type)
         if address_label:
             address_label.setVisible(self.type_choice == "single")
+        self.multisig_policy_panel.setVisible(self.type_choice == "multisig")
         self.stack.setCurrentIndex(0)
 
     def _continue_wallet_setup(self):
@@ -1068,7 +1083,8 @@ class ColdSignerDialog(QDialog):
             self.entropy_audit: "Secret source values, the exact SHA-256 command, and the resulting entropy. These values can recreate your recovery phrase.",
             self.recovery_count: "Choose the number of words on your existing recovery backup.",
             self.final_word: "Choose the final word from your backup. Several words can pass the checksum; only your original word restores the intended wallet.",
-            self.threshold: "The number of different signers required to authorize a transaction.",
+            self.threshold: "M: the number of different signers required to authorize a transaction.",
+            self.multisig_total: "N: the total number of signers in this wallet, including this signer.",
             self.own_signer_name: "A short label for this device or signer, so you can distinguish it from the other signers.",
             self.address_detail_value: "The complete receiving address generated or checked by Bitcoin Core. Compare every character when verifying it elsewhere.",
             self.address_detail_label: "An optional label saved with your Core wallet. Wallet-file encryption is optional.",
@@ -1105,8 +1121,6 @@ class ColdSignerDialog(QDialog):
             "Generate address": "Ask Core for a fresh receiving address and save its derivation index and label.",
             "I wrote it down": "Hide the phrase and check that you can retype every word from your backup.",
             "Skip confirmation (testing)": "Development only: continue without checking your written recovery phrase. Use test wallets only.",
-            "+ Add signer": "Add another signer to the multisig policy. This flow supports up to 20 signers.",
-            "− Remove last": "Remove the last external signer from this policy. At least two signers must remain.",
             "Start camera scan": "Open the system QR scanner. It reads one address or transaction QR at a time.",
             "Scan QR with zbarcam": "Open the system camera scanner and read one static QR code.",
             "Import file…": "Load a binary or base64 PSBT file of up to 2 MiB for review.",
@@ -1696,29 +1710,28 @@ class ColdSignerDialog(QDialog):
             widget.installEventFilter(self)
         self._sync_threshold()
 
-    def _add_signer(self):
-        if len(self.signer_fields) >= 19:
-            return
-        self._add_signer_fields(f"Signer {len(self.signer_fields) + 2}")
-
-    def _remove_signer(self):
-        if len(self.signer_fields) <= 1:
-            return
-        name, key, scan = self.signer_fields.pop()
-        for widget in (name, key, scan):
-            self.signer_grid.removeWidget(widget)
-            widget.deleteLater()
-        label_item = self.signer_grid.itemAtPosition(len(self.signer_fields), 0)
-        if label_item and label_item.widget():
-            label_item.widget().deleteLater()
-        self._sync_threshold()
-
-    def _sync_threshold(self):
-        total = len(self.signer_fields) + 1
+    def _sync_threshold(self, *_args):
+        total = self.multisig_total.value()
         self.threshold.setMaximum(total)
-        if self.threshold.value() > total:
-            self.threshold.setValue(total)
-        self.signer_count_label.setText(f"{total} signers total")
+        summary = f"{self.threshold.value()} of {total} signers must approve"
+        self.signer_count_label.setText(summary)
+        if hasattr(self, "multisig_summary"):
+            self.multisig_summary.setText(summary)
+
+    def _sync_multisig_signer_fields(self):
+        desired = self.multisig_total.value() - 1
+        while len(self.signer_fields) > desired:
+            name, key, scan = self.signer_fields.pop()
+            row = len(self.signer_fields)
+            for widget in (name, key, scan):
+                self.signer_grid.removeWidget(widget)
+                widget.deleteLater()
+            label_item = self.signer_grid.itemAtPosition(row, 0)
+            if label_item and label_item.widget():
+                label_item.widget().deleteLater()
+        while len(self.signer_fields) < desired:
+            self._add_signer_fields(f"Signer {len(self.signer_fields) + 2}")
+        self._sync_threshold()
 
     def _create_single_signature(self):
         try:
@@ -1777,6 +1790,7 @@ class ColdSignerDialog(QDialog):
         self._show_complete(result, f"{self.threshold.value()} of {len(signers) + 1} multisig")
 
     def _prepare_multisig(self):
+        self._sync_multisig_signer_fields()
         try:
             result = self.core.prepare_multisig_key(
                 self.phrase, self.current_wallet_passphrase, self.current_bip39_passphrase,
@@ -1871,6 +1885,10 @@ class ColdSignerDialog(QDialog):
         self.hidden_addresses = []
         self.wallet_name_input.clear()
         self.setup_choice = self.type_choice = None
+        self.threshold.setValue(2)
+        self.multisig_total.setValue(3)
+        self._sync_threshold()
+        self.multisig_policy_panel.hide()
         for control in (self.create_choice, self.recover_choice, self.single_choice, self.multi_choice):
             control.setChecked(False)
         self.setup_continue.setEnabled(False)
