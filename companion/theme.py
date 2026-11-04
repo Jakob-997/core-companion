@@ -212,6 +212,7 @@ QLineEdit, QComboBox, QPlainTextEdit, QSpinBox {
 QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: @border-strong@; }
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus { border-color: @blue@; }
 QLineEdit[readOnly="true"] { background: @surface-2@; }
+QSpinBox#PolicyNumber { padding-left: 18px; padding-right: 34px; }
 QLineEdit:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QSpinBox:disabled { color: @disabled@; background: @surface-2@; }
 QComboBox { min-width: 150px; }
 QComboBox::drop-down { border: 0; width: 26px; }
