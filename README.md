@@ -1,16 +1,16 @@
 # Core Companion
 
-**Design branch:** `design/desktop-polish` explores the native desktop interface.
-It includes new light/dark layouts, wallet identity panels, guided setup, and
-structured transaction review. The release-candidate limitations below still apply.
+**Published for outside review.** Version 0.1.0rc1 is an unaudited Linux
+release candidate. It is not ready for use with funds; independent security
+review and Debian host-isolation acceptance remain required.
 
-A small Linux desktop wallet interface built around Bitcoin Core. Qt Widgets
-provides the screens; Core handles descriptors, key derivation, addresses,
-ownership checks, wallet data, and PSBT review and signing. Trezor's reference
-`python-mnemonic` provides BIP39 and the BIP32 master key.
+A lightweight Linux desktop wallet interface built around Bitcoin Core. Qt
+Widgets provides the screens; Core handles descriptors, key derivation,
+addresses, ownership checks, wallet data, and PSBT review and signing. Trezor's
+reference `python-mnemonic` provides BIP39 and the BIP32 master key.
 
-**0.1.0rc1 is a release candidate for review. Independent security review and
-Debian host-isolation acceptance are still required before a funds-bearing release.**
+**License:** MIT for the original Core Companion source. Vendored components
+and dependencies retain their own licenses and notices.
 
 ## Install on Debian
 
