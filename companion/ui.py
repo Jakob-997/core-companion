@@ -115,6 +115,7 @@ class App(QMainWindow):
         self.dev_keep_network = bool(dev_keep_network)
         self.permanent_cold = PermanentAirgap.is_committed()
         self.cold_required = self.permanent_cold or (not self.dev_keep_network and PermanentAirgap.saved_wallets_exist())
+        self.online_node_requested = False
         self.isolation_timer = QTimer(self)
         self.isolation_timer.setInterval(2000)
         self.isolation_timer.timeout.connect(self._check_cold_isolation)
@@ -298,7 +299,6 @@ class App(QMainWindow):
         privacy_note = label("Downloads and sync stop if Tor disconnects.", "FormHint")
         privacy_note.setWordWrap(True)
         card_layout.addWidget(privacy_note)
-        card_layout.addWidget(button("Connect to Bitcoin Core", self.connect, True))
         self.download_button = button("Download && verify Bitcoin Core", self.download_bitcoin_core)
         self.download_button.setToolTip(
             "Downloads Core and its pinned signer keys, verifies the release, then installs it."
@@ -403,6 +403,12 @@ class App(QMainWindow):
         warning = label(detail, "Muted")
         warning.setWordWrap(True)
         notice_copy.addWidget(warning)
+        core_note = label(
+            "Cold storage does not download or sync the blockchain. Its signer Core process is temporary and peer-disabled.",
+            "FormHint",
+        )
+        core_note.setWordWrap(True)
+        notice_copy.addWidget(core_note)
         notice_layout.addLayout(notice_copy, 1)
         layout.addWidget(notice)
         self.permanent_acknowledgement = QCheckBox(
@@ -591,6 +597,7 @@ class App(QMainWindow):
         if self.mode_choice == "cold":
             self.start_cold_signer()
         elif self.mode_choice == "online":
+            self.online_node_requested = True
             if self.service:
                 self.sync_timer.start()
                 self.tabs.setCurrentIndex(2)
@@ -853,6 +860,7 @@ class App(QMainWindow):
         self.receive_used.setProperty("tone", "success")
         details.addWidget(self.receive_used)
         self.receive_mark_used = QCheckBox("Mark as used")
+        self.receive_mark_used.setToolTip("Newly generated addresses start marked used. This is a tracking label; check Core activity to confirm a payment.")
         self.receive_mark_used.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
         details.addWidget(self.receive_mark_used)
         details.addWidget(label("Receiving address", "FieldLabel"))
@@ -1199,10 +1207,10 @@ class App(QMainWindow):
             return
         self.downloaded_bitcoind = result["path"]
         self._set_core_status(f"Bitcoin Core {result['version']} verified and installed")
-        if self.mode_choice == "online":
+        if self.mode_choice == "online" and self.online_node_requested:
             self._start_managed_node(result["path"])
         else:
-            self.statusBar().showMessage("Core is ready. Choose Online Node to start syncing and connect.")
+            self.statusBar().showMessage("Core is verified and stays stopped until you start Online Node.")
 
     def _use_core_connection(self, cookie_path, port):
         self.core_cookie_path = Path(cookie_path)
@@ -1210,6 +1218,9 @@ class App(QMainWindow):
 
     def _start_managed_node(self, binary=None, *, prefer_existing=True):
         if not self._allow_online():
+            return
+        if self.mode_choice != "online" or not self.online_node_requested:
+            self.statusBar().showMessage("Choose Online Node and continue before starting blockchain sync.")
             return
         if sys.platform != "linux":
             self.statusBar().showMessage("Starting a downloaded Core node is available on Linux.")
@@ -1712,6 +1723,11 @@ class App(QMainWindow):
     def connect(self):
         if not self._allow_online():
             return
+        if self.mode_choice != "online" or not self.online_node_requested:
+            self.statusBar().showMessage("Choose Online Node and continue before connecting to Bitcoin Core.")
+            self.tabs.setCurrentIndex(1)
+            return
+        self.online_node_requested = True
         if self.busy:
             return
         if not self._ensure_tor(self.connect):
@@ -1960,6 +1976,8 @@ class App(QMainWindow):
         self.receive_qr.setPixmap(self._qr_pixmap(result[0], size=320))
         self.receive_visual.setCurrentIndex(1)
         self.receive_details.show()
+        self.receive_mark_used.setChecked(True)
+        self._store_address_preference(result[0], used=True)
         self.receive_used.show()
         self.receive_label.setReadOnly(False)
         self.receive_done.show()
@@ -1996,6 +2014,7 @@ class App(QMainWindow):
         name.setPlaceholderText("Label (optional)")
         layout.addWidget(name)
         used = QCheckBox("Mark as used")
+        used.setToolTip("Tracking label for this address. It does not confirm an on-chain payment.")
         used.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
         used.setChecked(self._address_preferences().get(address, {}).get("used", record.get("amount", 0) > 0))
         layout.addWidget(used)
@@ -2568,7 +2587,9 @@ def main(argv=None):
     if window.cold_required:
         window._set_core_status("Permanent cold installation · online functions disabled")
     elif window._installed_core_binary() or default_cookie_path().is_file():
-        window._set_core_status("Choose network privacy, then connect to Bitcoin Core.")
+        window._set_core_status("Bitcoin Core is available · it stays stopped until Online Node starts.")
+        window.statusBar().showMessage("Bitcoin Core will remain stopped until you start Online Node.")
     else:
-        window._set_core_status("Choose network privacy, then download and verify Core.")
+        window._set_core_status("Download and verify Core when ready. It will stay stopped until Online Node starts.")
+        window.statusBar().showMessage("Bitcoin Core will remain stopped until you start Online Node.")
     application.exec()

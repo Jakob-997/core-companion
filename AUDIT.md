@@ -347,3 +347,18 @@ system prompts and confirmation dialogs can still appear as dialogs. Connection
 and privacy page navigation received an offscreen Qt smoke check. The cold
 helper handoff and live Core startup were not exercised on a Linux host; the
 Debian VM remains untouched because it contains a saved wallet.
+
+
+## Deferred node startup and address-use defaults (2026-11-03)
+
+The welcome screen can download and verify Bitcoin Core without launching the
+node. Online node startup and RPC connection now require choosing Online Node
+and continuing; connection controls route back to mode selection until then.
+A verified download remains stopped unless the user already continued into
+Online Node, in which case it completes the requested startup. Cold storage
+does not download or sync the blockchain. It still uses a short-lived,
+peer-disabled Core process for wallet operations.
+
+New receive addresses start marked used in both the online receive flow and the
+cold signer address list. This is an app tracking label, not a claim that
+Bitcoin Core observed an on-chain payment. Users can still change the marker.

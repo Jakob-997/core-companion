@@ -748,7 +748,7 @@ class ColdSignerDialog(QDialog):
         self.address_used_status = _label("Saved on this signer", True)
         fields.addWidget(self.address_used_status)
         self.address_used_check = QCheckBox("Mark as used")
-        self.address_used_check.setToolTip("Record that you used this address. The offline signer cannot check blockchain activity.")
+        self.address_used_check.setToolTip("Newly generated addresses start marked used. This is a tracking label; the offline signer cannot check blockchain activity.")
         self.address_used_check.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
         fields.addWidget(self.address_used_check)
         fields.addStretch()
@@ -1885,7 +1885,7 @@ class ColdSignerDialog(QDialog):
             address_item = QTableWidgetItem(record["address"])
             address_item.setFont(fixed_font(9))
             used_item = QTableWidgetItem("✓" if record.get("used") else "—")
-            used_item.setToolTip("Manually marked used on this signer; not an on-chain balance check.")
+            used_item.setToolTip("Tracking label on this signer; not an on-chain balance check.")
             used_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             font = used_item.font()
             font.setPointSize(18)
@@ -1905,7 +1905,7 @@ class ColdSignerDialog(QDialog):
         except ColdSetupError as exc:
             QMessageBox.warning(self, "Address generation failed", str(exc))
             return
-        record = {"address": result["address"], "label": "", "used": False}
+        record = {"address": result["address"], "label": "", "used": True}
         self.address_records = [item for item in self.address_records if item["address"] != record["address"]]
         self.address_records.insert(0, record)
         self._persist_current_wallet()
