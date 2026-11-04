@@ -262,8 +262,29 @@ QLabel#OutputIcon { color: @blue@; background: @surface-2@; border-radius: 8px; 
 QFrame#ReviewWarning, QLabel#ReviewWarning {
     background: @warning-soft@; color: @warning@; border: 1px solid @warning-border@; border-radius: 9px;
 }
+QFrame#CoreConnectionPanel {
+    background: @surface-2@; border: 1px solid @border@; border-radius: 12px;
+}
+QFrame#CoreConnectionPanel[state="connected"], QFrame#CoreConnectionPanel[state="success"] {
+    background: @accent-soft@; border-color: @accent@;
+}
+QFrame#CoreConnectionPanel[state="verified"] {
+    background: @blue-soft@; border-color: @blue@;
+}
+QFrame#CoreConnectionPanel[state="checking"] {
+    background: @blue-soft@; border-color: @blue@;
+}
+QFrame#CoreConnectionPanel[state="error"] {
+    background: @red-soft@; border-color: @red-border@;
+}
 QLabel#CoreStatus { color: @text@; font-size: 15px; font-weight: 650; }
-QLabel#CoreStatus[state="connected"] { color: @accent-strong@; }
+QLabel#CoreStatus[state="connected"], QLabel#CoreStatus[state="success"] {
+    color: @accent-strong@;
+}
+QLabel#CoreStatus[state="verified"], QLabel#CoreStatus[state="checking"] {
+    color: @blue@;
+}
+QLabel#CoreStatus[state="warning"] { color: @warning@; }
 QLabel#CoreStatus[state="error"] { color: @red@; }
 QFrame#WelcomePanel { background: @surface@; border: 1px solid @border@; border-radius: 18px; }
 QLabel#WelcomeMark { background: @blue@; color: @button-text@; border-radius: 18px; }
