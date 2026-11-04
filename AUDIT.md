@@ -362,3 +362,12 @@ peer-disabled Core process for wallet operations.
 New receive addresses start marked used in both the online receive flow and the
 cold signer address list. This is an app tracking label, not a claim that
 Bitcoin Core observed an on-chain payment. Users can still change the marker.
+
+
+## Recovery phrase entry layout (2026-11-03)
+
+Recovery uses individually numbered word fields arranged in the same column
+order as the generated phrase display. The grid follows the selected BIP39
+length, preserves already entered words when the length changes, and retains
+the checksum-based final-word recovery flow. Only the final field may be left
+blank for checksum candidates.

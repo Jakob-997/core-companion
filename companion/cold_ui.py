@@ -98,6 +98,7 @@ class ColdSignerDialog(QDialog):
         self.os_entropy = None
         self.phrase = None
         self.words = []
+        self.recovery_fields = []
         self.challenge = []
         self.wallet_mode = "single"
         self.setup_choice = None
@@ -400,19 +401,19 @@ class ColdSignerDialog(QDialog):
         for count in (12, 15, 18, 21, 24):
             self.recovery_count.addItem(f"{count} words", count)
         recovery.addWidget(self.recovery_count, 0, Qt.AlignmentFlag.AlignLeft)
-        self.recovery_text = QPlainTextEdit()
-        self.recovery_text.setPlaceholderText("Enter the words in order, separated by spaces")
-        self.recovery_text.setFixedHeight(150)
-        self.recovery_text.setFont(fixed_font(12))
-        recovery.addWidget(self.recovery_text)
-        self.recovery_text.textChanged.connect(self._clear_recovery_candidates)
+        self.recovery_grid = QGridLayout()
+        self.recovery_grid.setHorizontalSpacing(12)
+        self.recovery_grid.setVerticalSpacing(10)
+        recovery.addLayout(self.recovery_grid)
         self.recovery_hint = _label("", True)
         recovery.addWidget(self.recovery_hint)
         self.final_word = ComboBox()
         self.final_word.hide()
         recovery.addWidget(self.final_word)
-        hint = _label("Missing the last word? Continue to see valid choices, then choose the word on your backup.", True)
+        hint = _label("Enter one word in each numbered box. Leave the last box empty if you need to recover its checksum-valid choices.", True)
         recovery.addWidget(hint)
+        self.recovery_count.currentIndexChanged.connect(self._render_recovery_fields)
+        self._render_recovery_fields()
         layout.addStretch()
         footer = QHBoxLayout()
         back = QPushButton("Back")
@@ -424,6 +425,41 @@ class ColdSignerDialog(QDialog):
         continue_button.clicked.connect(self._continue_recovery)
         footer.addWidget(continue_button)
         layout.addLayout(footer)
+
+    def _render_recovery_fields(self, *_args):
+        previous = [field.text() for field in getattr(self, "recovery_fields", [])]
+        _clear_layout(self.recovery_grid)
+        count = int(self.recovery_count.currentData())
+        columns = 4 if count > 18 else 3
+        rows = (count + columns - 1) // columns
+        self.recovery_fields = []
+        for column in range(4):
+            self.recovery_grid.setColumnStretch(column, 0)
+        for index in range(count):
+            tile = QFrame()
+            tile.setObjectName("WordTile")
+            line = QHBoxLayout(tile)
+            line.setContentsMargins(10, 8, 10, 8)
+            line.setSpacing(10)
+            number = _label(f"{index + 1:02d}")
+            number.setObjectName("WordNumber")
+            number.setWordWrap(False)
+            number.setFixedWidth(28)
+            number.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            line.addWidget(number)
+            field = QLineEdit()
+            field.setAccessibleName(f"Recovery word {index + 1}")
+            field.setPlaceholderText("Recovery word")
+            field.setMaxLength(32)
+            field.setToolTip(f"Enter word {index + 1} from your recovery phrase.")
+            field.textChanged.connect(self._clear_recovery_candidates)
+            line.addWidget(field, 1)
+            self.recovery_grid.addWidget(tile, index % rows, index // rows)
+            self.recovery_fields.append(field)
+            if index < len(previous):
+                field.setText(previous[index])
+        for column in range(columns):
+            self.recovery_grid.setColumnStretch(column, 1)
 
     def _build_phrase_page(self):
         layout = self._card(scroll=True)
@@ -1040,7 +1076,6 @@ class ColdSignerDialog(QDialog):
             self.word_count: "12 words encode 128 bits; 24 encode 256 bits. The full SHA-256 is always shown in Audit details. BIP39 later derives a 512-bit seed.",
             self.entropy_audit: "Secret source values, the exact SHA-256 command, and the resulting entropy. These values can recreate your recovery phrase.",
             self.recovery_count: "Choose the number of words on your existing recovery backup.",
-            self.recovery_text: "Enter your existing recovery words in order. This offline signer checks their BIP39 checksum.",
             self.final_word: "Choose the final word from your backup. Several words can pass the checksum; only your original word restores the intended wallet.",
             self.threshold: "The number of different signers required to authorize a transaction.",
             self.own_signer_name: "A short label for this device or signer, so you can distinguish it from the other signers.",
@@ -1072,6 +1107,8 @@ class ColdSignerDialog(QDialog):
         }
         for widget, explanation in fields.items():
             widget.setToolTip(explanation)
+        for index, widget in enumerate(self.recovery_fields, 1):
+            widget.setToolTip(f"Enter word {index} from your existing recovery phrase. The offline signer checks the BIP39 checksum.")
         descriptions = {
             "Generate recovery phrase": "Generate a recovery phrase from Bitcoin Core wallet data, Linux randomness, and optional user entropy.",
             "Generate address": "Ask Core for a fresh receiving address and save its derivation index and label.",
@@ -1467,7 +1504,8 @@ class ColdSignerDialog(QDialog):
         if self.core is None:
             return
         self._clear_recovery_candidates()
-        self.recovery_text.clear()
+        for field in self.recovery_fields:
+            field.clear()
         self.stack.setCurrentIndex(2)
 
     def _open_core(self, bitcoind):
@@ -1561,15 +1599,19 @@ class ColdSignerDialog(QDialog):
 
     def _continue_recovery(self):
         count = int(self.recovery_count.currentData())
-        tokens = " ".join(self.recovery_text.toPlainText().split()).split()
-        if len(tokens) == count:
+        tokens = [field.text().strip() for field in self.recovery_fields]
+        if any(len(value.split()) > 1 for value in tokens):
+            QMessageBox.warning(self, "One word per box", "Enter one recovery word in each numbered box.")
+            return
+        missing = [index for index, value in enumerate(tokens) if not value]
+        if not missing:
             try:
                 self.phrase = validate_phrase(" ".join(tokens))
             except SeedError as exc:
                 QMessageBox.warning(self, "Phrase checksum failed", str(exc))
                 return
-        elif len(tokens) == count - 1:
-            prefix = " ".join(tokens)
+        elif missing == [count - 1] and all(tokens[:-1]):
+            prefix = " ".join(tokens[:-1])
             if self.recovery_prefix != prefix:
                 try:
                     candidates = final_word_candidates(prefix)
@@ -1581,18 +1623,23 @@ class ColdSignerDialog(QDialog):
                     return
                 self.final_word.clear()
                 self.final_word.addItems(candidates)
+                self.final_word.setCurrentIndex(-1)
                 self.final_word.show()
                 self.recovery_prefix = prefix
                 self.recovery_hint.setText(
                     f"{len(candidates)} checksum-valid final words. Choose the final word from your backup, then continue again."
                 )
                 return
-            self.phrase = validate_phrase(prefix + " " + self.final_word.currentText())
+            final = self.final_word.currentText()
+            if not final:
+                QMessageBox.warning(self, "Choose the final word", "Choose the final word from your existing backup.")
+                return
+            self.phrase = validate_phrase(prefix + " " + final)
         else:
             QMessageBox.warning(
                 self,
                 "Recovery phrase length",
-                f"Enter {count} words, or enter the first {count - 1} and choose the final word.",
+                f"Fill all {count} numbered boxes in order, or leave only word {count} empty to see valid final-word choices.",
             )
             return
         self.words = self.phrase.split()
@@ -1758,7 +1805,8 @@ class ColdSignerDialog(QDialog):
     def _clear_setup_secrets(self):
         self.phrase = None
         self.words.clear()
-        self.recovery_text.clear()
+        for field in self.recovery_fields:
+            field.clear()
         self.wallet_digest = None
         self.os_entropy = None
         self.entropy_audit.clear()
