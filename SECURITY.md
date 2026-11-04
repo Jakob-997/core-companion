@@ -8,7 +8,7 @@ updater. Downloads contact Core's official sites, its pinned-key keyserver and
 PyPI during installation. The online Core node communicates with Bitcoin peers.
 
 The online UI uses local cookie-authenticated RPC and offers watch-only wallets.
-Cold keys are used in a separate helper and an isolated Core directory on tmpfs. Completed wallets are persisted only as Core-encrypted backups. Labels, public descriptors and wallet names are readable metadata. The saved wallet opens locked; encryption passwords are not stored. The entropy-source wallet remains RAM-only and is removed after hashing.
+Cold keys are used in a separate helper and an isolated Core directory on tmpfs. Wallet-file encryption is optional and recommended. If selected, completed wallets are persisted as Core-encrypted backups and open locked; encryption passwords are not stored. If not selected, the saved Core backup contains usable private keys. The app stores it with mode 0600 in a mode 0700 directory, but those permissions do not protect against access by the same user, root, malware or an unlocked account. Use full-disk encryption and protect the computer physically. Labels, public descriptors and wallet names are readable metadata either way. The entropy-source wallet remains RAM-only and is removed after hashing.
 The helper disables dumps; host swap and non-loopback network interfaces are
 disabled before normal cold use. Normal cold mode now commits to a persistent machine-wide offline policy; networking is never restored by the app. Periodic checks stop the signer if isolation changes; they cannot prevent every race or privileged change. Source development
 mode intentionally leaves host networking on and is unsuitable for valuable keys.

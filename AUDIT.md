@@ -194,14 +194,16 @@ are changed by these harnesses. The production application stays on mainnet.
 
 Native UI fixture checks cover 12/24-word vertical confirmation order, the
 exact audit command with arbitrary UTF-8 and shell punctuation, default-hidden
-BIP39 fields, mandatory file encryption, the Send page, removed cold-signer
-online tool and LifeHash color/determinism. LifeHash passes its upstream RGB
-reference vector. These review scripts remain outside the application repo.
+BIP39 fields, the then-mandatory file encryption, the Send page, removed
+cold-signer online tool and LifeHash color/determinism. LifeHash passes its
+upstream RGB reference vector. These review scripts remain outside the
+application repo. The encryption requirement was later removed; see the
+November 3 update below.
 
 This implementation work does not replace independent security review or a
 full Debian camera, desktop authorization and isolation acceptance pass.
 
-Additional checks exercise the actual Qt-to-Core save/switch/reopen path, preserved used labels, address removal without key loss, backup failure preventing close/switch, and reopening after a Core restart. Encrypted multisig reopening, rejection of plaintext backups and concurrent writers also pass. All main native pages fit 980×680 in both themes; a signed-transaction dialog opens without an implicit default broadcast button. Camera hardware and GNOME integration remain manual VM acceptance items.
+Additional checks exercise the actual Qt-to-Core save/switch/reopen path, preserved used labels, address removal without key loss, backup failure preventing close/switch, and reopening after a Core restart. At that point, encrypted multisig reopening, rejection of plaintext backups and concurrent writers also passed. The plaintext-backup rejection is superseded by the November 3 update below. All main native pages fit 980×680 in both themes; a signed-transaction dialog opens without an implicit default broadcast button. Camera hardware and GNOME integration remain manual VM acceptance items.
 
 ## Permanent air-gap correction
 
@@ -299,3 +301,18 @@ run remains required; this validation does not claim it was performed.
 Origin information is supplied metadata, not cryptographic proof of another
 signer's seed/path. [BIP380](https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki)
 defines the general origin/key syntax; no BIP87 restriction is implied by it.
+
+
+## Optional wallet-file encryption (2026-11-03)
+
+Wallet-file encryption is now an option during setup, recommended and enabled
+by default. If disabled, Core saves an unencrypted wallet backup; the app marks
+its status, warns that the file contains usable private keys, and allows it to
+be saved and reopened without a wallet password. Core's `unlocked_until` state
+is checked against the recorded status. Backups remain mode 0600 in a mode
+0700 application directory with atomic replacement. Use full-disk encryption
+and physical protection when choosing an unencrypted wallet file.
+
+This source change has not yet had a fresh unencrypted-wallet Core save/reopen
+acceptance run. Earlier checks that required or rejected plaintext backups
+describe the previous behavior and are not evidence for the optional flow.

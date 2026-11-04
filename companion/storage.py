@@ -1,4 +1,4 @@
-"""Private file permissions and atomic writes for encrypted Core backups."""
+"""Private file permissions and atomic writes for Core wallet backups."""
 
 import json
 import os
@@ -97,15 +97,24 @@ class ColdWalletStore:
                 or not isinstance(data.get("hidden_addresses", []), list)
                 or any(not isinstance(value, str) for value in data.get("hidden_addresses", []))):
             raise ColdSetupError("The saved wallet metadata is incomplete or invalid.")
+        result_encrypted = data["result"].get("encrypted")
+        metadata_encrypted = data.get("encrypted")
+        if ((result_encrypted is not None and type(result_encrypted) is not bool)
+                or (metadata_encrypted is not None and type(metadata_encrypted) is not bool)
+                or (result_encrypted is not None and metadata_encrypted is not None
+                    and result_encrypted is not metadata_encrypted)):
+            raise ColdSetupError("The saved wallet encryption status is invalid.")
         return data
 
     def save(self, rpc, wallet_id, metadata):
         self.acquire()
         if len(json.dumps(metadata, ensure_ascii=True).encode("utf-8")) > 2 * 1024 * 1024:
             raise ColdSetupError("The public address list exceeds the saved metadata limit.")
-        # Core must confirm encryption before any private wallet leaves tmpfs.
-        if "unlocked_until" not in rpc.call("getwalletinfo", wallet="cold-signer"):
-            raise ColdSetupError("Set wallet-file encryption before saving the cold wallet.")
+        encrypted = "unlocked_until" in rpc.call("getwalletinfo", wallet="cold-signer")
+        result = metadata.get("result")
+        if not isinstance(result, dict) or result.get("encrypted") is not encrypted:
+            raise ColdSetupError("The wallet encryption status changed; keep the signer open and retry.")
+        metadata = dict(metadata, encrypted=encrypted)
         wallet_id = wallet_id or secrets.token_hex(16)
         directory = self._directory(wallet_id)
         temporary = directory / ("backup-" + secrets.token_hex(8) + ".dat")
@@ -137,7 +146,7 @@ class ColdWalletStore:
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 256 * 1024 * 1024:
-                raise ColdSetupError("The encrypted wallet backup is invalid.")
+                raise ColdSetupError("The saved wallet backup is invalid.")
             destination.parent.mkdir(mode=0o700)
             with destination.open("xb") as output:
                 os.chmod(destination, 0o600)

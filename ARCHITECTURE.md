@@ -158,14 +158,18 @@ cannot install/start Tor; their network policy also masks Tor system services.
    strings from process memory. The helper isolation reduces exposure but does
    not make this a reviewed or production-secure signer.
 
-Completed wallets require Core file encryption. Core backupwallet writes a
-consistent backup, permissions are set to 0600, and an atomic rename replaces
-the previous wallet.dat. Public metadata is saved separately with atomic writes
-and directory fsync. A held flock prevents simultaneous writers. The app backs
-up after setup, address generation, label/status changes and before switching
-or closing. On reopen it copies the encrypted backup into the private tmpfs
-wallet directory and asks Core to load it locked. The throwaway entropy wallet
-never enters this persistent storage.
+Wallet-file encryption is optional. Core backupwallet writes a consistent
+backup with the selected encryption state, permissions are set to 0600, and an
+atomic rename replaces the previous wallet.dat. The app records and checks that
+state when reopening. Unencrypted backups contain usable private keys; the
+application data directory is mode 0700, but full-disk encryption and physical
+protection remain important. Public metadata is saved separately with atomic
+writes and directory fsync. A held flock prevents simultaneous writers. The
+app backs up after setup, address generation, label/status changes and before
+switching or closing. On reopen it copies the backup into the private tmpfs
+wallet directory. Core loads encrypted backups locked; unencrypted backups are
+available without a wallet password. The throwaway entropy wallet never enters
+this persistent storage.
 
 Public exports combine the exact receive/change pair into /<0;1>/* only after
 Core confirms expansion reproduces both original canonical descriptors. Core

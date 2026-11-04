@@ -833,7 +833,7 @@ class ColdSignerDialog(QDialog):
         advanced.setChecked(QSettings("CoreCompanion", "CoreCompanion").value("bip39_enabled", False, type=bool))
         advanced.toggled.connect(self._set_advanced_bip39)
         session.addWidget(advanced)
-        session.addWidget(_label("The encrypted wallet and labels are saved on this computer. Only working copies and the entropy-source wallet are temporary.", True))
+        session.addWidget(_label("Wallet files are saved on this computer. Encryption is optional; labels and public descriptors remain readable.", True))
         layout.addStretch()
 
     def _build_setup_page(self):
@@ -842,7 +842,7 @@ class ColdSignerDialog(QDialog):
         saved = QHBoxLayout()
         saved.addWidget(_label("Saved wallets"))
         self.saved_wallets = ComboBox()
-        self.saved_wallets.setToolTip("Open an encrypted wallet previously saved on this computer.")
+        self.saved_wallets.setToolTip("Open a saved wallet. Its encryption status is shown in the list.")
         saved.addWidget(self.saved_wallets, 1)
         self.open_saved_button = QPushButton("Open wallet")
         self.open_saved_button.clicked.connect(self._open_saved_wallet)
@@ -931,13 +931,14 @@ class ColdSignerDialog(QDialog):
         self._toggle_bip39_fields(False)
 
         content.addStretch()
-        content = _panel(columns, "Wallet-file encryption", "Core saves this wallet encrypted on this computer.")
-        self.encrypt_wallet = QCheckBox("Encrypt wallet")
-        self.encrypt_wallet.setToolTip("Core encrypts the saved wallet. A password is required before private keys can be written to disk. Labels and public descriptors remain readable.")
+        content = _panel(columns, "Wallet-file encryption", "Optional · protects the saved private keys")
+        self.encrypt_wallet = QCheckBox("Encrypt saved wallet file · recommended")
+        self.encrypt_wallet.setToolTip("Optional. Core encrypts the saved private keys, and you will need this password to reopen or sign. If disabled, the saved wallet file contains unencrypted private keys.")
         self.encrypt_wallet.setChecked(True)
-        self.encrypt_wallet.setEnabled(False)
         content.addWidget(self.encrypt_wallet)
-        self.encrypt_wallet.hide()
+        self.wallet_storage_note = _label("", True)
+        self.wallet_storage_note.setObjectName("InfoStrip")
+        content.addWidget(self.wallet_storage_note)
         self.wallet_password1 = QLineEdit()
         self.wallet_password1.setPlaceholderText("Password")
         self.wallet_password1.setEchoMode(QLineEdit.EchoMode.Password)
@@ -950,7 +951,7 @@ class ColdSignerDialog(QDialog):
         content.addWidget(self.wallet_show)
         self.encrypt_wallet.toggled.connect(self._toggle_wallet_fields)
         self.wallet_show.toggled.connect(self._toggle_wallet_visibility)
-        self._toggle_wallet_fields(True)
+        self._toggle_wallet_fields(self.encrypt_wallet.isChecked())
         content.addStretch()
         layout.addLayout(columns)
         layout.addStretch()
@@ -1039,11 +1040,12 @@ class ColdSignerDialog(QDialog):
             self.threshold: "The number of different signers required to authorize a transaction.",
             self.own_signer_name: "A short label for this device or signer, so you can distinguish it from the other signers.",
             self.address_detail_value: "The complete receiving address generated or checked by Bitcoin Core. Compare every character when verifying it elsewhere.",
-            self.address_detail_label: "An optional label saved with your encrypted Core wallet.",
+            self.address_detail_label: "An optional label saved with your Core wallet. Wallet-file encryption is optional.",
             self.descriptors: "Public receive and change descriptors checked by Core. Multisig recovery needs this policy as well as the required private keys.",
             self.bip39_passphrase1: "An extra secret used with the recovery phrase. A different passphrase produces a different wallet; there is no wrong-passphrase warning.",
             self.bip39_passphrase2: "Enter the BIP39 passphrase again to check for typing mistakes.",
-            self.wallet_password1: "Encrypt the saved Core private keys with a password of at least 10 characters. This is separate from a BIP39 passphrase.",
+            self.encrypt_wallet: "Optional. When enabled, Core encrypts the saved private keys and requires this password to reopen or sign. When disabled, anyone with access to the wallet file can use its private keys.",
+            self.wallet_password1: "Password for the saved Core wallet file. Required only when wallet-file encryption is enabled; separate from a BIP39 passphrase.",
             self.wallet_password2: "Enter the wallet-file password again to check for typing mistakes.",
             self.scan_payload: "Paste a Bitcoin address, payment QR text, or base64 PSBT. Continue detects which type it is.",
             self.psbt_input: "A partially signed Bitcoin transaction from your online wallet. Core reviews its contents before signing is enabled.",
@@ -1394,6 +1396,13 @@ class ColdSignerDialog(QDialog):
         if not enabled:
             self.wallet_password1.clear()
             self.wallet_password2.clear()
+            self.wallet_storage_note.setText(
+                "Without encryption, the saved file contains usable private keys. Use full-disk encryption and protect this computer physically."
+            )
+        else:
+            self.wallet_storage_note.setText(
+                "Core encrypts the saved file. Keep this password with your recovery backup; it is needed to reopen or sign."
+            )
 
     def _toggle_wallet_visibility(self, visible):
         mode = QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
@@ -1776,7 +1785,7 @@ class ColdSignerDialog(QDialog):
             + (f"Signer fingerprint · {self.wallet_fingerprint}" if self.wallet_fingerprint else "Signer fingerprint unavailable from Core")
         )
         self.status_left.setText(f"{self.wallet_display_name} · {wallet_type}")
-        self.status_right.setText(f"Signer {self.wallet_fingerprint}" if self.wallet_fingerprint else "Cold signer · offline")
+        self.status_right.setText("Encrypted wallet file" if self.wallet_encrypted else "Unencrypted wallet file")
         self._update_identity_mark()
         signer_map = result.get("signers", [])
         if signer_map:
@@ -1810,7 +1819,7 @@ class ColdSignerDialog(QDialog):
         self.wallet_ready = self.multisig_prepared = False
         self.setWindowTitle("Core Companion — Cold storage")
         self.status_left.setText("Cold signer · choose wallet")
-        self.status_right.setText("Saved wallets are encrypted")
+        self.status_right.setText("Wallet-file encryption is optional")
         self._clear_setup_secrets()
         self.address_records = []
         self.hidden_addresses = []
@@ -2312,7 +2321,10 @@ class ColdSignerDialog(QDialog):
         if self.core is not None:
             try:
                 for wallet_id, name in self.core.store.list_wallets():
-                    self.saved_wallets.addItem(name, wallet_id)
+                    metadata = self.core.store.read_metadata(wallet_id)
+                    encrypted = metadata.get("encrypted", metadata["result"].get("encrypted", True))
+                    status = "Encrypted" if encrypted else "Unencrypted"
+                    self.saved_wallets.addItem(f"{name} · {status}", wallet_id)
             except (OSError, ColdSetupError) as exc:
                 QMessageBox.warning(self, "Wallet storage unavailable", str(exc))
         available = self.saved_wallets.count() > 0

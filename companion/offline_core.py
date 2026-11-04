@@ -719,7 +719,7 @@ class OfflineCore:
         try:
             self.wallet_id = self.store.save(self.rpc, self.wallet_id, metadata)
         except (OSError, ValueError, CoreError) as exc:
-            raise ColdSetupError("Could not save the encrypted wallet. Keep this window open and check the storage location.") from exc
+            raise ColdSetupError("Could not save the wallet. Keep this window open and check the storage location.") from exc
         return self.wallet_id
 
     def unload_signer(self):
@@ -738,8 +738,12 @@ class OfflineCore:
             metadata = self.store.restore(wallet_id, path)
             self.rpc.call("loadwallet", ["cold-signer", False])
             info = self.rpc.call("getwalletinfo", wallet="cold-signer")
-            if "unlocked_until" not in info:
-                raise ColdSetupError("The saved cold wallet is not encrypted.")
+            encrypted = "unlocked_until" in info
+            recorded_encryption = metadata.get(
+                "encrypted", metadata.get("result", {}).get("encrypted", True)
+            )
+            if recorded_encryption is not encrypted:
+                raise ColdSetupError("The saved wallet encryption status does not match its Core backup.")
             self.address_type = metadata["address_type"]
             if self.address_type not in ("bech32", "bech32m", "p2sh-segwit", "legacy"):
                 raise ValueError()
@@ -752,7 +756,7 @@ class OfflineCore:
             result["address_info"] = self.rpc.call("getaddressinfo", [result["address"]], wallet="cold-signer")
             if result["address_info"].get("ismine") is not True:
                 raise ColdSetupError("The saved identity address does not belong to this Core wallet.")
-            result["encrypted"] = True
+            result["encrypted"] = encrypted
             hidden = set(metadata.get("hidden_addresses", []))
             records = {item["address"]: item for item in metadata.get("address_records", []) if item["address"] not in hidden}
             for item in self.rpc.call("listreceivedbyaddress", {"minconf": 0, "include_empty": True}, wallet="cold-signer"):
@@ -761,7 +765,7 @@ class OfflineCore:
             metadata["address_records"] = list(records.values())
             return metadata
         except (OSError, ValueError, KeyError, CoreError) as exc:
-            raise ColdSetupError("Core could not open the saved encrypted wallet.") from exc
+            raise ColdSetupError("Core could not open the saved wallet.") from exc
 
     def public_descriptor(self, descriptors):
         return combined_public_descriptor(self.rpc, descriptors)

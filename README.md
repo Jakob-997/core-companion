@@ -101,7 +101,7 @@ inputs, one reproducible SHA-256 command, the full 256-bit result and the exact 
 That command uses only Python's standard library. Anyone with its inputs can
 recreate the phrase; inspect them only on a trusted offline computer.
 
-BIP39 passphrases are hidden by default. Enable them in Settings only when needed; a passphrase changes the derived wallet. Wallet-file encryption is required for saved cold wallets and protects private keys in Core's backup. Labels and public descriptors remain readable. Python and Qt cannot guarantee erasure of secret memory.
+BIP39 passphrases are hidden by default. Enable them in Settings only when needed; a passphrase changes the derived wallet. Wallet-file encryption is optional and recommended. If disabled, the saved Core backup contains unencrypted private keys; anyone who can read that file can spend from the wallet. Use full-disk encryption and protect access to the computer. Labels and public descriptors remain readable either way. Python and Qt cannot guarantee erasure of secret memory.
 
 For multisig, choose the local signer derivation path (BIP87 is only the
 default), then share its public account key and origin. Other signers may use
@@ -111,13 +111,16 @@ and descriptors before importing the P2WSH policy. The wizard supports 2–20 si
 wallet as a single checksummed receive/change multipath descriptor (/<0;1>/*), in QR or text form. It can be imported by Sparrow or the online node.
 
 **Completed cold wallets are saved, including address labels and indices.**
-Core writes an encrypted backup under the application data directory:
+Core writes a backup under the application data directory:
 **~/.local/share/core-companion/cold-wallets/** (or XDG_DATA_HOME). Working copies
 remain in RAM; the entropy-source wallet is deleted immediately after hashing.
+Each wallet uses the encryption choice made during setup; files are mode 0600
+inside a mode 0700 directory.
 Change wallet saves and unloads the current signer, then lets you open a saved
-wallet in the same helper window. The saved backup opens locked; signing needs
-the wallet encryption password. An exclusive file lock prevents concurrent
-signer sessions from overwriting backups.
+wallet in the same helper window. Encrypted backups open locked and require the
+wallet password to sign. Unencrypted backups open without a password. An
+exclusive file lock prevents concurrent signer sessions from overwriting
+backups.
 
 Keep the recovery phrase and complete public policy as an independent backup.
 Multisig recovery needs enough signers' private backups. Removing an address
