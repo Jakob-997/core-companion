@@ -128,7 +128,13 @@ class App(QMainWindow):
         self.downloaded_bitcoind = None
         self.core_download_closing = False
         self.core_download_cancelled = False
-        self.core_cookie_path = None
+        saved_core_directory = QSettings("CoreCompanion", "CoreCompanion").value(
+            "core/dataDirectory", "", type=str
+        )
+        self.core_data_directory = str(saved_core_directory or "").strip()
+        self.core_cookie_path = (
+            Path(self.core_data_directory) / ".cookie" if self.core_data_directory else None
+        )
         self.connection_fallback = False
         self.local_probe_pending = False
         self.pending_cold_start = False
@@ -290,36 +296,38 @@ class App(QMainWindow):
         status_layout = QVBoxLayout(status_panel)
         status_layout.setContentsMargins(10, 10, 10, 10)
         status_layout.setSpacing(8)
-        self.core_status = label("Checking for Bitcoin Core…", "CoreStatus")
+        status_panel.setObjectName("CoreConnectionPanel")
+        self.core_status_panel = status_panel
+        self.core_status = label("Checking local connection…", "CoreStatus")
         self.core_status.setWordWrap(True)
-        self.core_status.setMinimumHeight(36)
+        self.core_status.setMinimumHeight(32)
         self.core_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         status_layout.addWidget(self.core_status)
-        status_layout.addWidget(label(
-            "Local RPC check only. Companion does not start Core or connect it to peers here.",
+        self.core_status_hint = label(
+            "Checking this computer for an already-running Bitcoin Core node.",
             "FormHint",
-        ))
+        )
+        self.core_status_hint.setWordWrap(True)
+        status_layout.addWidget(self.core_status_hint)
         card_layout.addWidget(status_panel)
         self.local_core_check_button = button("Check local connection", self.check_local_core)
         self.local_core_check_button.setObjectName("Quiet")
         self.local_core_check_button.setToolTip(
-            "Checks an already-running Core through 127.0.0.1. It does not launch Core, start Tor, or begin blockchain sync."
+            "Checks an already-running Bitcoin Core node through local RPC. It does not start Core, Tor, or blockchain sync."
         )
         card_layout.addWidget(self.local_core_check_button)
-        self.tor_choice = QCheckBox("Tor only (recommended)")
-        self.tor_choice.setChecked(self.tor_enabled)
-        self.tor_choice.setToolTip("Route Core downloads, signing-key downloads and blockchain sync through Tor, with no direct fallback.")
-        self.tor_choice.toggled.connect(self._privacy_toggled)
-        card_layout.addWidget(self.tor_choice)
-        privacy_note = label(
-            "When selected, Tor routes Core downloads and Online Node. Cold signing does not connect to Bitcoin peers; sync begins only in Online Node.",
-            "FormHint",
+        self.core_folder_button = button("Select Core data folder…", self.select_core_data_directory)
+        self.core_folder_button.setObjectName("Quiet")
+        self.core_folder_button.setToolTip(
+            "Choose the folder where an already-running Bitcoin Core stores its .cookie file. This is used only for the local RPC connection."
         )
-        privacy_note.setWordWrap(True)
-        card_layout.addWidget(privacy_note)
+        card_layout.addWidget(self.core_folder_button)
+        choose_or = label("or", "FormHint")
+        choose_or.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(choose_or)
         self.download_button = button("Download && verify Bitcoin Core", self.download_bitcoin_core)
         self.download_button.setToolTip(
-            "Downloads Core and its pinned signer keys, verifies the release, then installs it."
+            "Downloads Bitcoin Core and its pinned signer keys, verifies the release, then installs it."
         )
         card_layout.addWidget(self.download_button)
         download_status = QHBoxLayout()
@@ -333,6 +341,17 @@ class App(QMainWindow):
         self.cancel_download_button.hide()
         download_status.addWidget(self.cancel_download_button)
         card_layout.addLayout(download_status)
+        self.tor_choice = QCheckBox("Tor only (recommended)")
+        self.tor_choice.setChecked(self.tor_enabled)
+        self.tor_choice.setToolTip("Route Core downloads, signing-key downloads and blockchain sync through Tor, with no direct fallback.")
+        self.tor_choice.toggled.connect(self._privacy_toggled)
+        card_layout.addWidget(self.tor_choice)
+        privacy_note = label(
+            "When selected, Tor routes Core downloads and Online Node. Cold signing does not connect to Bitcoin peers; sync begins only in Online Node.",
+            "FormHint",
+        )
+        privacy_note.setWordWrap(True)
+        card_layout.addWidget(privacy_note)
         advanced = QHBoxLayout()
         advanced_button = button("Advanced connection settings…", self.show_connection)
         advanced_button.setObjectName("Quiet")
@@ -344,9 +363,18 @@ class App(QMainWindow):
         layout.addLayout(content)
         layout.addStretch(1)
         continue_row = QHBoxLayout()
-        continue_row.addWidget(label("Need a hand? Hover over a control, or turn on Help.", "FooterNote"))
+        self.welcome_next_hint = label(
+            "Check a local connection or download and verify Bitcoin Core to continue.",
+            "FooterNote",
+        )
+        continue_row.addWidget(self.welcome_next_hint)
         continue_row.addStretch()
-        continue_row.addWidget(button("Choose wallet mode  →", lambda: self.tabs.setCurrentIndex(1), True))
+        self.welcome_continue_button = button("Continue  →", self._continue_welcome, True)
+        self.welcome_continue_button.setToolTip(
+            "Continue after a local Core connection succeeds or a Core release is verified."
+        )
+        self.welcome_continue_button.setEnabled(False)
+        continue_row.addWidget(self.welcome_continue_button)
         layout.addLayout(continue_row)
         self.tabs.addTab(page, "Welcome")
 
@@ -361,9 +389,79 @@ class App(QMainWindow):
             field.style().polish(field)
             field.updateGeometry()
             field.update()
+        if hasattr(self, "core_status_panel"):
+            self.core_status_panel.setProperty("state", state)
+            self.core_status_panel.style().unpolish(self.core_status_panel)
+            self.core_status_panel.style().polish(self.core_status_panel)
+            self.core_status_panel.update()
+        self._update_welcome_actions()
+
+    def _update_welcome_actions(self):
+        if not hasattr(self, "welcome_continue_button"):
+            return
+        verified = bool(self._installed_core_binary())
+        connected = self.core_status.property("state") == "connected"
+        pending = self.local_probe_pending or self.busy
+        ready = verified or connected
+        self.welcome_continue_button.setEnabled(ready and not pending)
+        can_check = not self.cold_required and self.mode_choice != "cold" and not pending
+        self.local_core_check_button.setEnabled(can_check)
+        self.core_folder_button.setEnabled(can_check)
+        if pending:
+            text = "Checking local Bitcoin Core…"
+        elif connected and verified:
+            text = "Connected · Bitcoin Core is also verified."
+        elif connected:
+            text = "Connected to Bitcoin Core · ready to continue."
+        elif verified:
+            text = "Bitcoin Core is verified · ready to continue."
+        else:
+            text = "Check a local connection or download and verify Bitcoin Core to continue."
+        self.welcome_next_hint.setText(text)
+
+    def _continue_welcome(self):
+        if self.local_probe_pending or self.busy:
+            self.statusBar().showMessage("Wait for the local connection check to finish.")
+            return
+        if not self.welcome_continue_button.isEnabled():
+            self.statusBar().showMessage(
+                "Connect to a local Core or download and verify Bitcoin Core first."
+            )
+            return
+        self.tabs.setCurrentIndex(1)
+
+    def _core_cookie(self):
+        return self.core_cookie_path or default_cookie_path()
+
+    def select_core_data_directory(self):
+        if not self._allow_online():
+            return
+        initial = self.core_data_directory or str(default_cookie_path().parent)
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Bitcoin Core data folder",
+            initial,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not directory:
+            return
+        self.core_data_directory = directory
+        self.core_cookie_path = Path(directory) / ".cookie"
+        QSettings("CoreCompanion", "CoreCompanion").setValue(
+            "core/dataDirectory", directory
+        )
+        if self.core_cookie_path.is_file():
+            self.statusBar().showMessage("Core data folder selected. Checking local connection.")
+            self.check_local_core()
+        else:
+            self._set_core_status("No running Core found in this folder", "error")
+            self.core_status_hint.setText(
+                "The selected folder has no active .cookie file. Start Core with this data folder, or download and verify Core below."
+            )
+            self.statusBar().showMessage("No active Core cookie found in the selected folder.")
 
     def check_local_core(self):
-        """Probe only an existing standard local Core RPC endpoint; never launch Core."""
+        """Probe only an existing local Core RPC endpoint; never launch Core."""
         if not self._allow_online():
             return
         if self.mode_choice == "cold" or self.cold_session:
@@ -371,14 +469,25 @@ class App(QMainWindow):
             return
         if self.busy or self.local_probe_pending:
             return
-        cookie = default_cookie_path()
+        cookie = self._core_cookie()
         if not cookie.is_file():
-            self.refresh_core_availability()
-            self.statusBar().showMessage("No existing local Core connection was found. Core and networking remain stopped.")
+            if self.core_data_directory:
+                self._set_core_status("No running Core found in this folder", "error")
+                self.core_status_hint.setText(
+                    "No active .cookie file was found in the selected folder. Start Core there, select another folder, or download and verify Core."
+                )
+            else:
+                self.refresh_core_availability()
+            self.statusBar().showMessage(
+                "No running local Core found. Select its data folder or download and verify Bitcoin Core."
+            )
             return
         self.local_probe_pending = True
-        self.local_core_check_button.setEnabled(False)
-        self._set_core_status("Checking local Core RPC · no node launch or sync")
+        self._set_core_status("Checking local connection…", "checking")
+        self.core_status_hint.setText(
+            "Testing the existing local RPC connection. Core will not be started and blockchain sync will not begin."
+        )
+        self._update_welcome_actions()
         port = self.port.text()
         self.task(
             "Checking the existing local Bitcoin Core connection…",
@@ -392,27 +501,35 @@ class App(QMainWindow):
         active = node.get("networkactive")
         peers = node.get("connections")
         peer_count = peers if type(peers) is int and peers >= 0 else None
+        details = [version, "local RPC responded"]
         if active is False:
-            detail, state = "Bitcoin peer networking is off.", "success"
+            details.append("peer networking is off")
         elif active is True:
             count = f"{peer_count} peer connection(s)" if peer_count is not None else "peer networking enabled"
-            detail, state = f"Already-running Core reports {count}.", "warning"
-        else:
-            detail, state = "Core did not report peer-network status.", "warning"
-        self._set_core_status(f"Local Core responds · {version}. {detail}", state)
+            details.append(count)
+        self._set_core_status("✓ Connected to Bitcoin Core", "connected")
+        self.core_status_hint.setText(" · ".join(details))
         self.statusBar().showMessage(
-            "Loopback RPC check complete. Companion did not launch Core, Tor, or Bitcoin peers."
+            "Local Core connection confirmed. Companion did not start Core, Tor, or blockchain sync."
         )
 
     def refresh_core_availability(self):
         """Report local files only; this check makes no network connection."""
-        if default_cookie_path().is_file():
-            message = "Local Core cookie found. Select Check local connection to verify RPC."
+        if self._core_cookie().is_file():
+            self._set_core_status("Checking local connection…", "checking")
+            self.core_status_hint.setText(
+                "An existing Core cookie was found. Checking its local RPC connection."
+            )
         elif self._installed_core_binary():
-            message = "Bitcoin Core is installed. No online node is running; choose a mode to proceed."
+            self._set_core_status("Bitcoin Core is verified", "verified")
+            self.core_status_hint.setText(
+                "Ready to start when you choose Online Node. Blockchain sync does not start here."
+            )
         else:
-            message = "Bitcoin Core not found. Download and verify it here; sync waits for Online Node."
-        self._set_core_status(message)
+            self._set_core_status("No local Core connection found", "error")
+            self.core_status_hint.setText(
+                "Select the data folder for a running Core node, or download and verify Bitcoin Core below."
+            )
 
     def _mode_page(self):
         page, layout = page_layout(36, 24, "OnboardingPage")
@@ -691,7 +808,7 @@ class App(QMainWindow):
                 self.tabs.setCurrentIndex(2)
             else:
                 self.connection_purpose = "online"
-                cookie = default_cookie_path()
+                cookie = self._core_cookie()
                 if cookie.is_file():
                     self._use_core_connection(cookie, 8332)
                     self.connect()
@@ -1348,7 +1465,7 @@ class App(QMainWindow):
         if self.core_download_cancelled:
             self.core_download_cancelled = False
             self._stop_download_tor()
-            self._set_core_status("Bitcoin Core download cancelled")
+            self.refresh_core_availability()
             self.statusBar().showMessage("Bitcoin Core download cancelled")
             return
         try:
@@ -1365,7 +1482,10 @@ class App(QMainWindow):
             QMessageBox.critical(self, "Bitcoin Core was not installed", detail)
             return
         self.downloaded_bitcoind = result["path"]
-        self._set_core_status(f"Bitcoin Core {result['version']} verified and installed")
+        self._set_core_status("Bitcoin Core is verified", "verified")
+        self.core_status_hint.setText(
+            f"Bitcoin Core {result['version']} passed verification and is installed. Ready to continue."
+        )
         if self.mode_choice == "online" and self.online_node_requested:
             self._start_managed_node(result["path"])
         else:
@@ -1391,7 +1511,7 @@ class App(QMainWindow):
         if sys.platform != "linux":
             self.statusBar().showMessage("Starting a downloaded Core node is available on Linux.")
             return
-        default_cookie = default_cookie_path()
+        default_cookie = self._core_cookie()
         if not self.tor_enabled and prefer_existing and default_cookie.is_file():
             self._use_core_connection(default_cookie, 8332)
             self.connect()
@@ -1868,9 +1988,12 @@ class App(QMainWindow):
                 self.mode_choice != "cold" and not self.cold_required
             )
             if error:
-                self._set_core_status("No existing Core responded. Nothing was started.", "error")
+                self._set_core_status("Could not connect to Bitcoin Core", "error")
+                self.core_status_hint.setText(
+                    "Check that Core is running in this data folder, choose another folder, or download and verify Core below."
+                )
                 self.statusBar().showMessage(
-                    "Choose Online Node to start Core and check its connection."
+                    "No node was started. Check the Core data folder or verify a Core download."
                 )
                 return
             try:
@@ -1902,6 +2025,10 @@ class App(QMainWindow):
                 return
             if self.service is None:
                 self._set_core_status("Could not connect. Check that Core is running.", "error")
+                if self.local_probe_pending is False and hasattr(self, "core_status_hint"):
+                    self.core_status_hint.setText(
+                        "Check the selected Core data folder, or download and verify Core below."
+                    )
             self.statusBar().showMessage(error)
         else:
             try:
@@ -2823,4 +2950,5 @@ def main(argv=None):
         window._set_core_status("Permanent cold installation · online functions disabled")
     else:
         window.refresh_core_availability()
+        QTimer.singleShot(0, window.check_local_core)
     application.exec()
