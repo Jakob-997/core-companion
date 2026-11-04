@@ -310,17 +310,24 @@ class ColdSignerDialog(QDialog):
         policy_title.setObjectName("FormTitle")
         policy_layout.addWidget(policy_title)
         policy_fields = QFormLayout()
-        policy_fields.setVerticalSpacing(10)
+        policy_fields.setVerticalSpacing(12)
+        policy_fields.setHorizontalSpacing(22)
         self.threshold = QSpinBox()
+        self.threshold.setObjectName("PolicyNumber")
         self.threshold.setButtonSymbols(QSpinBox.ButtonSymbols.PlusMinus)
         self.threshold.setRange(1, 3)
         self.threshold.setValue(2)
-        self.threshold.setMaximumWidth(150)
+        self.threshold.setMinimumWidth(140)
+        self.threshold.setMaximumWidth(170)
+        self.threshold.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.multisig_total = QSpinBox()
+        self.multisig_total.setObjectName("PolicyNumber")
         self.multisig_total.setButtonSymbols(QSpinBox.ButtonSymbols.PlusMinus)
         self.multisig_total.setRange(2, 20)
         self.multisig_total.setValue(3)
-        self.multisig_total.setMaximumWidth(150)
+        self.multisig_total.setMinimumWidth(140)
+        self.multisig_total.setMaximumWidth(170)
+        self.multisig_total.setAlignment(Qt.AlignmentFlag.AlignCenter)
         policy_fields.addRow("Required signatures (M)", self.threshold)
         policy_fields.addRow("Total signers (N)", self.multisig_total)
         policy_layout.addLayout(policy_fields)
@@ -567,12 +574,16 @@ class ColdSignerDialog(QDialog):
         own_key_fields.addStretch()
         own_key_row.addLayout(own_key_fields, 1)
         own_panel.addLayout(own_key_row)
-        self.own_signer_name = QLineEdit("This signer")
+        self.own_signer_name = QLineEdit("This device")
+        self.own_signer_name.setPlaceholderText("e.g. Hardware signer")
+        self.own_signer_name.setToolTip(
+            "A short label for this device in the multisig policy. It does not affect the keys."
+        )
         self.multisig_summary = _label(self.signer_count_label.text(), True)
         form = QFormLayout()
         form.setVerticalSpacing(12)
         form.addRow("Policy", self.multisig_summary)
-        form.addRow("This signer", self.own_signer_name)
+        form.addRow("Signer name", self.own_signer_name)
         own_panel.addLayout(form)
         signers_panel = _panel(layout, "Other signers")
         self.signer_grid = QGridLayout()
@@ -979,10 +990,10 @@ class ColdSignerDialog(QDialog):
         self._toggle_bip39_fields(False)
 
         content.addStretch()
-        content = _panel(columns, "Wallet-file encryption", "Optional · protects the saved private keys")
-        self.encrypt_wallet = QCheckBox("Encrypt saved wallet file · recommended")
+        content = _panel(columns, "Wallet-file encryption", "Optional · choose before Core creates the wallet keys")
+        self.encrypt_wallet = QCheckBox("Encrypt wallet file (optional)")
         self.encrypt_wallet.setToolTip("Optional. Core encrypts the saved private keys, and you will need this password to reopen or sign. If disabled, the saved wallet file contains unencrypted private keys.")
-        self.encrypt_wallet.setChecked(True)
+        self.encrypt_wallet.setChecked(False)
         content.addWidget(self.encrypt_wallet)
         self.wallet_storage_note = _label("", True)
         self.wallet_storage_note.setObjectName("InfoStrip")
@@ -1085,7 +1096,7 @@ class ColdSignerDialog(QDialog):
             self.final_word: "Choose the final word from your backup. Several words can pass the checksum; only your original word restores the intended wallet.",
             self.threshold: "M: the number of different signers required to authorize a transaction.",
             self.multisig_total: "N: the total number of signers in this wallet, including this signer.",
-            self.own_signer_name: "A short label for this device or signer, so you can distinguish it from the other signers.",
+            self.own_signer_name: "A short name for this device in the multisig wallet policy.",
             self.address_detail_value: "The complete receiving address generated or checked by Bitcoin Core. Compare every character when verifying it elsewhere.",
             self.address_detail_label: "An optional label saved with your Core wallet. Wallet-file encryption is optional.",
             self.descriptors: "Public receive and change descriptors checked by Core. Multisig recovery needs this policy as well as the required private keys.",
@@ -1480,7 +1491,7 @@ class ColdSignerDialog(QDialog):
         self.current_bip39_passphrase = ""
         self.current_wallet_passphrase = ""
         self.use_bip39_passphrase.setChecked(False)
-        self.encrypt_wallet.setChecked(True)
+        self.encrypt_wallet.setChecked(False)
         self.bip39_show.setChecked(False)
         self.wallet_show.setChecked(False)
         for field in (self.bip39_passphrase1, self.bip39_passphrase2, self.wallet_password1, self.wallet_password2):
