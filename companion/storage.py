@@ -108,13 +108,13 @@ class ColdWalletStore:
 
     def save(self, rpc, wallet_id, metadata):
         self.acquire()
-        if len(json.dumps(metadata, ensure_ascii=True).encode("utf-8")) > 2 * 1024 * 1024:
-            raise ColdSetupError("The public address list exceeds the saved metadata limit.")
         encrypted = "unlocked_until" in rpc.call("getwalletinfo", wallet="cold-signer")
         result = metadata.get("result")
         if not isinstance(result, dict) or result.get("encrypted") is not encrypted:
             raise ColdSetupError("The wallet encryption status changed; keep the signer open and retry.")
-        metadata = dict(metadata, encrypted=encrypted)
+        metadata = dict(metadata, encrypted=encrypted, format=1)
+        if len(json.dumps(metadata, ensure_ascii=True).encode("utf-8")) > 2 * 1024 * 1024:
+            raise ColdSetupError("The public address list exceeds the saved metadata limit.")
         wallet_id = wallet_id or secrets.token_hex(16)
         directory = self._directory(wallet_id)
         temporary = directory / ("backup-" + secrets.token_hex(8) + ".dat")
@@ -126,7 +126,7 @@ class ColdWalletStore:
             with temporary.open("rb") as stream:
                 os.fsync(stream.fileno())
             os.replace(temporary, directory / "wallet.dat")
-            atomic_json(directory / "metadata.json", dict(metadata, format=1))
+            atomic_json(directory / "metadata.json", metadata)
             if os.name == "posix":
                 fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
                 try:

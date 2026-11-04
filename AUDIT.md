@@ -313,6 +313,9 @@ is checked against the recorded status. Backups remain mode 0600 in a mode
 0700 application directory with atomic replacement. Use full-disk encryption
 and physical protection when choosing an unencrypted wallet file.
 
-This source change has not yet had a fresh unencrypted-wallet Core save/reopen
-acceptance run. Earlier checks that required or rejected plaintext backups
-describe the previous behavior and are not evidence for the optional flow.
+Earlier checks that required or rejected plaintext backups describe the
+previous behavior and are not evidence for the optional flow. A local
+mock-RPC smoke check passed save/reopen metadata handling for both encryption
+states. A live Core save/reopen check remains pending; the Debian VM was left
+untouched after finding a saved wallet on it. Use a disposable VM with no saved
+keys for that acceptance run. The temporary smoke script was removed.
