@@ -20,10 +20,12 @@ class WalletService:
     def __init__(self, rpc):
         self.rpc = rpc
 
-    def import_public_wallet(self, name, descriptors):
+    def import_public_wallet(self, name, descriptors, timestamp=0):
         validate_wallet_name(name)
+        if type(timestamp) is not int or timestamp < 0:
+            raise CoreError("Choose a valid wallet history start date.")
         descriptors = expand_public_descriptors(self.rpc, descriptors)
-        requests = [{"desc": descriptor, "timestamp": 0, "active": True,
+        requests = [{"desc": descriptor, "timestamp": timestamp, "active": True,
                      "internal": index == 1, "range": [0, 1000]}
                     for index, descriptor in enumerate(descriptors)]
         self.rpc.call("createwallet", {"wallet_name": name, "disable_private_keys": True, "blank": True})
