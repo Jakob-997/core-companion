@@ -249,3 +249,13 @@ account xpubs with origins, not already-ranged branch descriptors: the wizard
 adds /0/* and /1/* itself. Duplicate xpub rejection is independent of origin
 labels/paths. The selected local path is retained during preparation and reused
 for private derivation; it cannot silently fall back to the default at import.
+
+
+## Welcome connection boundary
+
+Application startup reads local Core files only. A user-requested connection
+check uses authenticated, read-only loopback RPC to an already-running Core; it
+does not launch Core, Tor or Bitcoin peer networking. Tor's SOCKS port is
+reserved only when a Tor-protected download or Online Node connection starts.
+Core downloads are explicit, and Tor stops after download unless Online Node
+was requested.

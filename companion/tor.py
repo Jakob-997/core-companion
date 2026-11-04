@@ -18,9 +18,7 @@ class TorSession(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            self.proxy = "127.0.0.1:" + str(listener.getsockname()[1])
+        self.proxy = None
         self.process = None
         self.bootstrapped = False
         self.output = ""
@@ -38,6 +36,9 @@ class TorSession(QObject):
         executable = _system_tool("tor")
         if not executable or not _system_tool("curl"):
             raise ValueError("Install Tor and curl first: sudo apt install tor curl")
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            self.proxy = "127.0.0.1:" + str(listener.getsockname()[1])
         directory = data_directory() / "tor"
         if directory.is_symlink():
             raise ValueError("Tor storage must not be a symbolic link.")

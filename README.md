@@ -176,3 +176,16 @@ References: [Bitcoin Core](https://bitcoincore.org/en/download/),
 [Trezor python-mnemonic](https://github.com/trezor/python-mnemonic),
 [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki),
 [BIP87](https://github.com/bitcoin/bips/blob/master/bip-0087.mediawiki).
+
+
+## Welcome and network startup
+
+The welcome screen reads local Core files only and makes no network connection
+on launch. Its optional local connection check uses authenticated read-only RPC
+on `127.0.0.1` to an already-running Core; it does not start Core, Tor, peers
+or sync. It reports peer status if that separate Core already has connections.
+If Core is stopped, choose Online Node to start it and check the connection.
+Downloading and verifying Core is a separate user action and uses the selected
+Tor route. Tor stops after the download unless Online Node was already selected.
+The same verified Core release serves both the peer-disabled cold signer and
+the online node.

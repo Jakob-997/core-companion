@@ -371,3 +371,22 @@ order as the generated phrase display. The grid follows the selected BIP39
 length, preserves already entered words when the length changes, and retains
 the checksum-based final-word recovery flow. Only the final field may be left
 blank for checksum candidates.
+
+
+## Welcome connection check and deferred networking (2026-11-03)
+
+Welcome inspects local Core files without initiating network activity. An
+explicit user action may issue the read-only `getnetworkinfo` RPC to an
+already-running Core at loopback; it never launches Core, Tor, peers or sync.
+That result includes the existing node's peer-network state and count, so an
+already-online external Core is reported as such rather than described as
+offline. If no local cookie is present, the UI says no local connection was
+found and leaves Core stopped.
+
+The Tor SOCKS port is now selected when Tor is explicitly started, not during
+application construction. Core release download remains a separate explicit
+action and follows the selected Tor setting. A successful download stops Tor
+unless Online Node was already requested; Online Node starts Core and sync only
+after mode selection. The verified Core binary is shared by the Online Node
+and peer-disabled cold signer paths. This UI flow does not prove the host has
+no physical network hardware or that unrelated processes are offline.
