@@ -206,6 +206,11 @@ class App(QMainWindow):
         menu_button.setMenu(self.wallet_menu)
         menu_button.setToolTip("Open wallet navigation, connection options, and application information.")
         toolbar.addWidget(menu_button)
+        self.close_button = IconButton(
+            "close", "Close", self.close,
+            tooltip="Close Core Companion safely.",
+        )
+        toolbar.addWidget(self.close_button)
         root.addLayout(toolbar)
         divider = QFrame()
         divider.setObjectName("HeaderDivider")
@@ -716,6 +721,11 @@ class App(QMainWindow):
         help_button.setProperty("active", self.help_mode)
         help_button.installEventFilter(self)
         heading.addWidget(help_button, 0, Qt.AlignmentFlag.AlignTop)
+        dialog_close = IconButton(
+            "close", "Close", dialog.reject,
+            tooltip="Close this window.",
+        )
+        heading.addWidget(dialog_close, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(heading)
         return dialog, layout
 
@@ -1913,6 +1923,13 @@ class App(QMainWindow):
         dialog.setWindowTitle(title)
         dialog.resize(900, 600)
         layout = QVBoxLayout(dialog)
+        heading = QHBoxLayout()
+        heading.addStretch()
+        heading.addWidget(IconButton(
+            "close", "Close", dialog.accept,
+            tooltip="Close this window.",
+        ))
+        layout.addLayout(heading)
         text = QPlainTextEdit(content)
         text.setReadOnly(True)
         layout.addWidget(text)

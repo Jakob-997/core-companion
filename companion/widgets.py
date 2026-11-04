@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QPushButto
 
 
 _ICONS = {
+    "close": '<path d="m6 6 12 12M18 6 6 18"/>',
     "menu": '<path d="M4 6h16M4 12h16M4 18h16"/>',
     "back": '<path d="m14 6-6 6 6 6"/>',
     "chevron-right": '<path d="m9 6 6 6-6 6"/>',

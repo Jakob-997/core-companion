@@ -319,3 +319,12 @@ mock-RPC smoke check passed save/reopen metadata handling for both encryption
 states. A live Core save/reopen check remains pending; the Debian VM was left
 untouched after finding a saved wallet on it. Use a disposable VM with no saved
 keys for that acceptance run. The temporary smoke script was removed.
+
+
+## Close controls (2026-11-03)
+
+Added an explicit Close control to the online window, cold-signer window and
+modal dialog headers. Each routes through the existing close/reject handlers,
+preserving wallet save prompts and Core/Tor shutdown behavior. An offscreen Qt
+smoke check confirmed the controls are visible and close each window; cold Core
+startup was stubbed for the UI check.

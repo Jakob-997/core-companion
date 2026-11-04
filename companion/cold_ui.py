@@ -149,6 +149,11 @@ class ColdSignerDialog(QDialog):
         self.theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         header.addWidget(self.theme_button)
         header.addWidget(IconButton("settings", "Settings", self._open_settings))
+        self.close_button = IconButton(
+            "close", "Close", self.close,
+            tooltip="Close the signer, save the wallet and stop temporary Core.",
+        )
+        header.addWidget(self.close_button)
         root.addLayout(header)
         divider = QFrame()
         divider.setObjectName("HeaderDivider")
