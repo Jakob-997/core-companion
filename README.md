@@ -1,12 +1,5 @@
 # Core Companion
 
-## Live browser demo
-
-[Open the temporary desktop session](https://lottery-somewhat-guam-wants.trycloudflare.com/).
-
-This runs the Linux app in a shared browser session. The session password is shared separately. The link is temporary and the host session is scheduled to stop after two hours. Use disposable data only: recovery backup confirmation is skipped, Bitcoin Core peer networking is disabled, and node sync stays at 0%. Never enter a real recovery phrase, private key or wallet password.
-
-
 **Published for outside review.** Version 0.1.0rc1 is an unaudited Linux
 release candidate. It is not ready for use with funds; independent security
 review and Debian host-isolation acceptance remain required.
