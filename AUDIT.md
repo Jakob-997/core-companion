@@ -390,3 +390,14 @@ unless Online Node was already requested; Online Node starts Core and sync only
 after mode selection. The verified Core binary is shared by the Online Node
 and peer-disabled cold signer paths. This UI flow does not prove the host has
 no physical network hardware or that unrelated processes are offline.
+
+
+## Cold signer launch repair (2026-11-03)
+
+The `companion/cold_ui.py` file on the prior main revision contained binary
+data instead of Python source. The online shell could launch, but the isolated
+cold helper could not import its interface. Restored the valid source module
+and added parent-window reporting for cold-helper startup failures, including
+the Core startup error when available. Python syntax compilation succeeded for
+the cold UI, main UI, and entry point. The Debian VM inspection was read-only;
+no wallet, node, networking, or swap settings were changed.

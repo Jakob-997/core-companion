@@ -110,6 +110,9 @@ class App(QMainWindow):
         self.cold_session_id = None
         self.cold_return_index = 1
         self.cold_helper_failed = False
+        self.cold_helper_ready = False
+        self.cold_helper_failure = ""
+        self.cold_helper_error_shown = False
         self.cold_temp_path = None
         self.cold_restoring = False
         self.dev_keep_network = bool(dev_keep_network)
@@ -482,7 +485,10 @@ class App(QMainWindow):
             if not self.dev_keep_network else "Testing only: never put real wallet keys on this VM.")
         self.permanent_acknowledgement.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
         layout.addWidget(self.permanent_acknowledgement)
-        memory_note = label("Swap is disabled while signing. Close other programs first; low memory can freeze the desktop.", "Muted")
+        memory_note = label(
+            "Swap is turned off while signing and restored when closed. Linux may ask for permission to turn it off or restore it. Close other programs first; a low-memory VM can freeze.",
+            "Muted",
+        )
         memory_note.setWordWrap(True)
         layout.addWidget(memory_note)
         layout.addStretch(1)
@@ -1538,6 +1544,9 @@ class App(QMainWindow):
             arguments.append("--dev-keep-network")
         process.setArguments(arguments)
         self.cold_helper_failed = False
+        self.cold_helper_ready = False
+        self.cold_helper_failure = ""
+        self.cold_helper_error_shown = False
         process.started.connect(lambda: setattr(self, "cold_process_group", int(process.processId())))
         process.readyReadStandardOutput.connect(lambda p=process: self._cold_helper_ready(p))
         process.finished.connect(self._cold_helper_finished)
@@ -1550,15 +1559,19 @@ class App(QMainWindow):
             return
         while process.canReadLine():
             line = bytes(process.readLine()).strip()
-            if line == b"COLD_SIGNER_FAILED":
+            if line.startswith(b"COLD_SIGNER_FAILED"):
                 self.cold_helper_failed = True
+                self.cold_helper_failure = line.partition(b" ")[2].decode("utf-8", "replace")[:1600]
                 return
             if line != b"COLD_SIGNER_READY":
                 continue
+            self.cold_helper_ready = True
             # Keep the online shell visible while temporary Core starts. Hand
             # off only when the isolated signer is ready to show its own UI.
             self.hide()
             if process.write(b"SHOW\n") < 0:
+                self.cold_helper_failed = True
+                self.cold_helper_failure = "The isolated signer did not accept the startup handoff."
                 process.terminate()
                 self.show()
                 self.raise_()
@@ -1703,18 +1716,27 @@ class App(QMainWindow):
                 self.statusBar().showMessage("Signer stopped · offline protection cannot be verified · keep this computer disconnected")
 
     def _cold_helper_finished(self, exit_code, exit_status):
+        failed = (
+            self.cold_helper_failed
+            or not self.cold_helper_ready
+            or exit_status != QProcess.ExitStatus.NormalExit
+            or exit_code != 0
+        )
         self._restore_cold_system()
         target = self.cold_return_index
         self.tabs.setCurrentIndex(target if 0 <= target < self.tabs.count() else 1)
         self.show()
         self.raise_()
         self.activateWindow()
-        if self.cold_helper_failed:
-            self.cold_helper_failed = False
+        if failed and not self.cold_helper_error_shown:
+            self.cold_helper_error_shown = True
+            detail = self.cold_helper_failure or (
+                f"The isolated signer stopped before opening (exit {exit_code})."
+            )
             QMessageBox.critical(
                 self,
                 "Cold signer could not start",
-                "The isolated Bitcoin Core process could not start. Check the verified Core installation and try again.",
+                detail + "\n\nNo signer window was opened. Correct the issue and try again.",
             )
 
     def _cold_helper_error(self, error):
@@ -1723,7 +1745,12 @@ class App(QMainWindow):
             self.show()
             self.raise_()
             self.activateWindow()
-            QMessageBox.critical(self, "Cold signer could not open", "The cold signer helper process could not be started.")
+            self.cold_helper_error_shown = True
+            QMessageBox.critical(
+                self,
+                "Cold signer could not open",
+                "The isolated signer process could not be started. Check the installation and try again.",
+            )
 
     def _drain(self):
         try:
@@ -2674,7 +2701,11 @@ def main(argv=None):
         from .cold_ui import ColdSignerDialog
         dialog = ColdSignerDialog(args.bitcoind, args.session_id, dev_keep_network=args.dev_keep_network)
         if dialog.core is None:
-            print("COLD_SIGNER_FAILED", flush=True)
+            print(
+                "COLD_SIGNER_FAILED "
+                + (dialog.startup_error or "The isolated Bitcoin Core process did not start."),
+                flush=True,
+            )
             return
         print("COLD_SIGNER_READY", flush=True)
         if sys.stdin.readline().strip() != "SHOW":

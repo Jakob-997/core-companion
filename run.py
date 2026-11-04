@@ -26,8 +26,20 @@ def _prepare_cold_helper():
         raise SystemExit("Could not disable dumpable memory for the cold signer.") from exc
 
 
+def _report_cold_helper_failure(message):
+    detail = " ".join(str(message).split())[:1600]
+    print("COLD_SIGNER_FAILED" + (" " + detail if detail else ""), flush=True)
+
+
 if "--cold-helper" in sys.argv:
-    _prepare_cold_helper()
+    try:
+        _prepare_cold_helper()
+    except SystemExit as exc:
+        _report_cold_helper_failure(exc)
+        raise
+    except Exception:
+        _report_cold_helper_failure("Could not prepare the isolated signer process.")
+        raise SystemExit(1) from None
 
 from companion.ui import main
 
