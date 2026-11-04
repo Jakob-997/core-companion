@@ -328,3 +328,22 @@ modal dialog headers. Each routes through the existing close/reject handlers,
 preserving wallet save prompts and Core/Tor shutdown behavior. An offscreen Qt
 smoke check confirmed the controls are visible and close each window; cold Core
 startup was stubbed for the UI check.
+
+
+## Single-window navigation (2026-11-03)
+
+Moved Bitcoin Core connection and network privacy settings into pages in the
+online application window. Settings now return to Tools, and connection uses
+the global Back control. The cold signer remains a separate process to keep
+seed handling and temporary Core outside the online application process. The
+online shell stays visible while that helper starts, then hides immediately
+before the signer window appears; closing the signer restores the prior page.
+Startup failures are reported by the online shell without displaying a helper
+error window over it.
+
+This provides one visible application window at a time; it does not make the
+online shell and the isolated signer the same native window. Standard operating
+system prompts and confirmation dialogs can still appear as dialogs. Connection
+and privacy page navigation received an offscreen Qt smoke check. The cold
+helper handoff and live Core startup were not exercised on a Linux host; the
+Debian VM remains untouched because it contains a saved wallet.

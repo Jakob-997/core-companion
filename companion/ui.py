@@ -108,6 +108,8 @@ class App(QMainWindow):
         self.cold_process = None
         self.cold_process_group = None
         self.cold_session_id = None
+        self.cold_return_index = 1
+        self.cold_helper_failed = False
         self.cold_temp_path = None
         self.cold_restoring = False
         self.dev_keep_network = bool(dev_keep_network)
@@ -143,7 +145,8 @@ class App(QMainWindow):
         self.sync_timer.timeout.connect(self.refresh_sync_status)
         self._menus()
         self._layout()
-        self._connection_dialog()
+        self._connection_page()
+        self._privacy_page()
         self._install_help_targets()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._drain)
@@ -237,7 +240,11 @@ class App(QMainWindow):
             self.cold_choice.setEnabled(False)
             self.cold_choice.setToolTip("The cold signer is available on Linux in this first release.")
         self.tabs.setCurrentIndex(0)
-        self.tabs.currentChanged.connect(lambda index: self.mode_indicator.setVisible(2 <= index <= 6 or index == 8))
+        self.tabs.currentChanged.connect(lambda index: self.mode_indicator.setVisible(
+            2 <= index <= 6 or index == 8
+            or index == getattr(self, "connection_page_index", -1)
+            or index == getattr(self, "privacy_page_index", -1)
+        ))
         self.tabs.currentChanged.connect(lambda index: self.global_back.setVisible(index not in (0, 2)))
         self.global_back.hide()
 
@@ -905,15 +912,18 @@ class App(QMainWindow):
         page.addWidget(imported)
         privacy = ActionRow("shield-check", "Network privacy", "Tor-only downloads and node connections.",
                             tooltip="Change Tor-only mode. Disabling it exposes your public IP to services and peers.", icon_key="shield-check")
-        privacy.clicked.connect(self._privacy_dialog)
+        privacy.clicked.connect(self._show_privacy_page)
         page.addWidget(privacy)
         appearance = ActionRow("dark", "Change appearance", "", tooltip="Switch light and dark mode.", icon_key="dark")
         appearance.clicked.connect(self._toggle_theme)
         page.addWidget(appearance)
         page.addStretch()
 
-    def _connection_dialog(self):
-        self.connection, layout = self._dialog("Local connection", "Bitcoin Core on this computer.", size=(620, 410))
+    def _connection_page(self):
+        layout = self.page("Connection")
+        self.connection_page_index = self.tabs.count() - 1
+        self.connection_return_index = 0
+        self._wallet_page_heading(layout, "Bitcoin Core connection", "Local RPC connection on this computer.")
         panel = QFrame()
         panel.setObjectName("FormPanel")
         content = QVBoxLayout(panel)
@@ -944,23 +954,82 @@ class App(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(button("Disconnect", self.disconnect))
         row.addStretch()
-        row.addWidget(button("Close", self.connection.hide))
         row.addWidget(button("Connect", self.connect, True))
         layout.addLayout(row)
-        self._dialog_help(self.connection)
+        self.connection_page = self.tabs.widget(self.connection_page_index)
+
+    def _close_connection_page(self):
+        if self.tabs.currentIndex() != getattr(self, "connection_page_index", -1):
+            return
+        target = getattr(self, "connection_return_index", 0)
+        if target == self.connection_page_index or not 0 <= target < self.tabs.count():
+            target = 0
+        self.tabs.setCurrentIndex(target)
+
+    def _privacy_page(self):
+        layout = self.page("Network privacy")
+        self.privacy_page_index = self.tabs.count() - 1
+        self._wallet_page_heading(layout, "Network privacy", "Choose how this installation reaches Bitcoin services and peers.")
+        panel = QFrame()
+        panel.setObjectName("FormPanel")
+        content = QVBoxLayout(panel)
+        content.setContentsMargins(22, 20, 22, 20)
+        content.setSpacing(16)
+        self.privacy_choice = QCheckBox("Tor only · recommended")
+        self.privacy_choice.setChecked(self.tor_enabled)
+        self.privacy_choice.setToolTip("Route Bitcoin Core downloads and managed node connections through Tor. There is no direct fallback.")
+        content.addWidget(self.privacy_choice)
+        self.privacy_ack = QCheckBox("I understand Core services and peers can see my public IP")
+        self.privacy_ack.setToolTip("Required to disable Tor-only routing. Your managed Core connection will stop before the new setting takes effect.")
+        self.privacy_ack.hide()
+        content.addWidget(self.privacy_ack)
+        note = label(
+            "If Tor stops, downloads and node connections stop. Disabling Tor exposes your public IP to download services and Bitcoin peers.",
+            "InfoStrip",
+        )
+        note.setWordWrap(True)
+        content.addWidget(note)
+        other_apps = label("This setting applies to Core Companion. Other apps and separately running nodes keep their own network settings.", "FormHint")
+        other_apps.setWordWrap(True)
+        content.addWidget(other_apps)
+        layout.addWidget(panel)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        footer.addWidget(button("Back to Tools", lambda: self.tabs.setCurrentIndex(6)))
+        footer.addStretch()
+        self.privacy_apply_button = button("Apply", self._apply_privacy_page, True)
+        footer.addWidget(self.privacy_apply_button)
+        layout.addLayout(footer)
+        self.privacy_choice.toggled.connect(self._update_privacy_page)
+        self.privacy_ack.toggled.connect(self._update_privacy_page)
+        self._update_privacy_page()
+
+    def _update_privacy_page(self, *_args):
+        disabling = self.tor_enabled and not self.privacy_choice.isChecked()
+        self.privacy_ack.setVisible(disabling)
+        self.privacy_apply_button.setEnabled(not disabling or self.privacy_ack.isChecked())
+
+    def _apply_privacy_page(self):
+        selected = self.privacy_choice.isChecked()
+        if self.tor_enabled and not selected and not self.privacy_ack.isChecked():
+            return
+        self._privacy_toggled(selected, confirmed=not selected and self.privacy_ack.isChecked())
+        if self.tor_enabled == selected:
+            self.tabs.setCurrentIndex(6)
 
     def show_connection(self):
         if not self._allow_online():
             return
-        if self.tabs.currentIndex() not in (0, 1):
+        current = self.tabs.currentIndex()
+        if current != self.connection_page_index:
+            self.connection_return_index = current
+        if current not in (0, 1):
             self.connection_purpose = "online"
         managed = self.managed_core_process
         binary = managed.program() if managed is not None else ""
         self.connection_binary.setText("Executable: " + binary if binary else "Executable: external Core (path is not reported by RPC)")
         self.connection_version.setText("Core version: " + str(getattr(self, "node_info", {}).get("subversion", "Not connected")))
-        self.connection.show()
-        self.connection.raise_()
-        self.connection.activateWindow()
+        self.tabs.setCurrentIndex(self.connection_page_index)
 
     def _installed_core_binary(self):
         root = companion_data_dir() / "bitcoin-core"
@@ -1352,6 +1421,7 @@ class App(QMainWindow):
             return
         self.network.setText("DEVELOPMENT · NOT AIR-GAPPED" if self.dev_keep_network else "● Permanent offline policy verified")
         self.cold_session_id = secrets.token_hex(16)
+        self.cold_return_index = self.cold_notice_previous if 0 <= self.cold_notice_previous < self.tabs.count() else 1
         self.isolation_timer.start()
         self.sync_timer.stop()
         self.node_start_timer.stop()
@@ -1373,13 +1443,34 @@ class App(QMainWindow):
         if self.dev_keep_network:
             arguments.append("--dev-keep-network")
         process.setArguments(arguments)
+        self.cold_helper_failed = False
         process.started.connect(lambda: setattr(self, "cold_process_group", int(process.processId())))
-        process.readyReadStandardOutput.connect(
-            lambda: self.hide() if process.canReadLine() and bytes(process.readLine()).strip() == b"COLD_SIGNER_READY" else None
-        )
+        process.readyReadStandardOutput.connect(lambda p=process: self._cold_helper_ready(p))
         process.finished.connect(self._cold_helper_finished)
         process.errorOccurred.connect(self._cold_helper_error)
+        self.statusBar().showMessage("Starting the isolated cold signer…")
         process.start()
+
+    def _cold_helper_ready(self, process):
+        if process is not self.cold_process:
+            return
+        while process.canReadLine():
+            line = bytes(process.readLine()).strip()
+            if line == b"COLD_SIGNER_FAILED":
+                self.cold_helper_failed = True
+                return
+            if line != b"COLD_SIGNER_READY":
+                continue
+            # Keep the online shell visible while temporary Core starts. Hand
+            # off only when the isolated signer is ready to show its own UI.
+            self.hide()
+            if process.write(b"SHOW\n") < 0:
+                process.terminate()
+                self.show()
+                self.raise_()
+                self.activateWindow()
+                self.statusBar().showMessage("Could not open the isolated signer. Try again.")
+            return
 
     def _check_cold_isolation(self):
         if not self.cold_session or self.cold_restoring:
@@ -1519,13 +1610,25 @@ class App(QMainWindow):
 
     def _cold_helper_finished(self, exit_code, exit_status):
         self._restore_cold_system()
-        self.tabs.setCurrentIndex(1)
+        target = self.cold_return_index
+        self.tabs.setCurrentIndex(target if 0 <= target < self.tabs.count() else 1)
         self.show()
         self.raise_()
+        self.activateWindow()
+        if self.cold_helper_failed:
+            self.cold_helper_failed = False
+            QMessageBox.critical(
+                self,
+                "Cold signer could not start",
+                "The isolated Bitcoin Core process could not start. Check the verified Core installation and try again.",
+            )
 
     def _cold_helper_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
             self._restore_cold_system()
+            self.show()
+            self.raise_()
+            self.activateWindow()
             QMessageBox.critical(self, "Cold signer could not open", "The cold signer helper process could not be started.")
 
     def _drain(self):
@@ -1692,7 +1795,6 @@ class App(QMainWindow):
             self._clear()
             self.statusBar().showMessage("This wallet view is set up for the expected Bitcoin chain only.")
             return
-        self.connection.hide()
         self.service = service
         self.node_info = data["node"]
         self._set_core_status("Bitcoin Core connected", "connected")
@@ -1722,7 +1824,8 @@ class App(QMainWindow):
             self.service = None
             self._clear()
             self.setWindowTitle("Core Companion")
-            self.connection.hide()
+            if self.tabs.currentIndex() == self.connection_page_index:
+                self._close_connection_page()
             self.statusBar().showMessage("Disconnected")
 
     def select_wallet(self, name):
@@ -2004,6 +2107,13 @@ class App(QMainWindow):
 
     def _go_back(self):
         self.recipient_scanner.stop()
+        current = self.tabs.currentIndex()
+        if current == getattr(self, "connection_page_index", -1):
+            self._close_connection_page()
+            return
+        if current == getattr(self, "privacy_page_index", -1):
+            self.tabs.setCurrentIndex(6)
+            return
         self.tabs.setCurrentIndex(0 if self.tabs.currentIndex() == 1 else 1 if self.tabs.currentIndex() == 7 else 2)
 
     def _address_preferences(self):
@@ -2212,7 +2322,7 @@ class App(QMainWindow):
             fee=fee, allowed=acceptance.get("allowed") is True)
 
 
-    def _privacy_toggled(self, enabled):
+    def _privacy_toggled(self, enabled, *, confirmed=False):
         if enabled == self.tor_enabled:
             return
         if not self._allow_online() or self.busy or self.core_download_process is not None or self.tor_install_process is not None:
@@ -2220,7 +2330,7 @@ class App(QMainWindow):
             accepted = False
         else:
             accepted = True
-            if not enabled:
+            if not enabled and not confirmed:
                 accepted = QMessageBox.warning(self, "Disable Tor protection?",
                     "Core downloads and blockchain connections will use the internet directly. "
                     "Download services and Bitcoin peers can see your public IP and link activity to it. "
@@ -2243,31 +2353,21 @@ class App(QMainWindow):
         self.tor_choice.blockSignals(True)
         self.tor_choice.setChecked(self.tor_enabled)
         self.tor_choice.blockSignals(False)
+        self.privacy_choice.blockSignals(True)
+        self.privacy_choice.setChecked(self.tor_enabled)
+        self.privacy_choice.blockSignals(False)
+        self.privacy_ack.blockSignals(True)
+        self.privacy_ack.setChecked(False)
+        self.privacy_ack.blockSignals(False)
+        self._update_privacy_page()
 
-    def _privacy_dialog(self):
+    def _show_privacy_page(self):
         if not self._allow_online():
             return
-        dialog, layout = self._dialog("Network privacy", "Choose how this installation connects.", size=(620, 360))
-        choice = QCheckBox("Tor only (recommended)")
-        choice.setChecked(self.tor_enabled)
-        choice.setToolTip(self.tor_choice.toolTip())
-        layout.addWidget(choice)
-        text = label("Downloads, signing keys and the managed node use Tor. If Tor stops, connections stop. "
-                     "Other apps and separately running nodes keep their own settings.", "Muted")
-        text.setWordWrap(True)
-        layout.addWidget(text)
-        layout.addStretch()
-        row = QHBoxLayout()
-        row.addWidget(button("Cancel", dialog.reject))
-        row.addStretch()
-        def apply():
-            self._privacy_toggled(choice.isChecked())
-            if self.tor_enabled == choice.isChecked():
-                dialog.accept()
-        row.addWidget(button("Apply", apply, True))
-        layout.addLayout(row)
-        self._dialog_help(dialog)
-        dialog.exec()
+        self.privacy_choice.blockSignals(True)
+        self.privacy_choice.setChecked(self.tor_enabled)
+        self.privacy_choice.blockSignals(False)
+        self.tabs.setCurrentIndex(self.privacy_page_index)
 
     def _ensure_tor(self, action):
         if not self.tor_enabled:
@@ -2405,7 +2505,9 @@ class App(QMainWindow):
         self.online_choice.setEnabled(False)
         self.tor_choice.setEnabled(False)
         self.download_button.setEnabled(False)
-        self.connection.hide()
+        if self.tabs.currentIndex() == self.connection_page_index:
+            self.connection_return_index = 0
+            self._close_connection_page()
         self.sync_timer.stop()
         self.node_start_timer.stop()
         self.connection_fallback = False
@@ -2452,9 +2554,13 @@ def main(argv=None):
         from .cold_ui import ColdSignerDialog
         dialog = ColdSignerDialog(args.bitcoind, args.session_id, dev_keep_network=args.dev_keep_network)
         if dialog.core is None:
+            print("COLD_SIGNER_FAILED", flush=True)
+            return
+        print("COLD_SIGNER_READY", flush=True)
+        if sys.stdin.readline().strip() != "SHOW":
+            dialog.shutdown_core()
             return
         dialog.show()
-        print("COLD_SIGNER_READY", flush=True)
         application.exec()
         return
     window = App(dev_keep_network=args.dev_keep_network)

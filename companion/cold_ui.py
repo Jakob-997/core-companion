@@ -1473,8 +1473,10 @@ class ColdSignerDialog(QDialog):
     def _open_core(self, bitcoind):
         try:
             self.core = OfflineCore(bitcoind, self.session_id, dev_keep_network=self.dev_keep_network).start()
-        except (ColdSetupError, OSError) as exc:
-            QMessageBox.critical(self, "Cold signer setup failed", str(exc))
+        except (ColdSetupError, OSError):
+            # Startup errors are reported by the parent shell. This helper is
+            # still hidden, so opening a dialog here would create a second
+            # visible window before the handoff.
             self.reject()
 
     def _update_entropy_audit(self, *_args):
