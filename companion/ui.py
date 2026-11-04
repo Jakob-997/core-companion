@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -16,7 +17,7 @@ import time
 from datetime import datetime
 from urllib.parse import urlsplit, parse_qs
 from pathlib import Path
-from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QSettings
+from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QSettings, QProcessEnvironment
 from PySide6.QtGui import QAction, QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
@@ -31,6 +32,8 @@ from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession, _system_tool
 from .permanent_airgap import PermanentAirgap
+from .network_privacy import core_tor_arguments, assert_core_tor
+from .tor import TorSession
 from .theme import stylesheet
 from .widgets import ActionRow, ChoiceRow, ComboBox, EmptyTable, IconButton, LineIcon, ScanIllustration, fixed_font
 from . import DEVELOPMENT_BUILD, __version__
@@ -122,6 +125,16 @@ class App(QMainWindow):
         self.connection_fallback = False
         self.pending_cold_start = False
         self.managed_core_process = None
+        self.managed_node_tor_proxy = None
+        self.managed_rpc_port = MANAGED_RPC_PORT
+        self.tor_enabled = QSettings("CoreCompanion", "CoreCompanion").value("network/torOnly", True, type=bool)
+        self.tor_pending = None
+        self.tor_install_process = None
+        self.tor_install_output = ""
+        self.tor = TorSession(self)
+        self.tor.ready.connect(self._tor_ready)
+        self.tor.progress.connect(lambda value: self._set_core_status(f"Connecting to Tor · {value}%"))
+        self.tor.unavailable.connect(self._tor_unavailable)
         self.node_start_timer = QTimer(self)
         self.node_start_timer.setInterval(1200)
         self.node_start_timer.timeout.connect(self._poll_managed_node)
@@ -136,7 +149,7 @@ class App(QMainWindow):
         self.timer.timeout.connect(self._drain)
         self.timer.start(40)
         self.statusBar().showMessage("Bitcoin Core connection is local to this computer")
-        self._set_core_status("Looking for Bitcoin Core…")
+        self._set_core_status("Choose privacy, then connect or download Core.")
         if self.cold_required:
             self._lock_cold_installation()
             self.mode_choice = "cold"
@@ -224,7 +237,7 @@ class App(QMainWindow):
         self.global_back.hide()
 
     def _welcome(self):
-        page, layout = page_layout(24, 24, "OnboardingPage")
+        page, layout = page_layout(20, 20, "OnboardingPage")
         layout.addStretch(1)
         content = QHBoxLayout()
         content.setSpacing(24)
@@ -250,24 +263,29 @@ class App(QMainWindow):
         card = QFrame()
         card.setObjectName("Surface")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(32, 30, 32, 30)
-        card_layout.setSpacing(16)
+        card_layout.setContentsMargins(32, 24, 32, 24)
+        card_layout.setSpacing(8)
         card_layout.addWidget(label("01  /  LOCAL CONNECTION", "SectionLabel"))
-        card_layout.addSpacing(8)
         card_layout.addWidget(label("Bitcoin Core", "Title"))
         status_panel = QFrame()
         status_panel.setObjectName("SubtlePanel")
         status_layout = QVBoxLayout(status_panel)
-        status_layout.setContentsMargins(16, 16, 16, 16)
+        status_layout.setContentsMargins(10, 10, 10, 10)
         status_layout.setSpacing(8)
         self.core_status = label("Checking for Bitcoin Core…", "CoreStatus")
         self.core_status.setWordWrap(True)
+        self.core_status.setMinimumHeight(36)
+        self.core_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         status_layout.addWidget(self.core_status)
-        detail = label("Connect locally or download a verified installation.", "Muted")
-        detail.setWordWrap(True)
-        status_layout.addWidget(detail)
         card_layout.addWidget(status_panel)
-        card_layout.addSpacing(4)
+        self.tor_choice = QCheckBox("Tor only (recommended)")
+        self.tor_choice.setChecked(self.tor_enabled)
+        self.tor_choice.setToolTip("Route Core downloads, signing-key downloads and blockchain sync through Tor, with no direct fallback.")
+        self.tor_choice.toggled.connect(self._privacy_toggled)
+        card_layout.addWidget(self.tor_choice)
+        privacy_note = label("Downloads and sync stop if Tor disconnects.", "FormHint")
+        privacy_note.setWordWrap(True)
+        card_layout.addWidget(privacy_note)
         card_layout.addWidget(button("Connect to Bitcoin Core", self.connect, True))
         self.download_button = button("Download && verify Bitcoin Core", self.download_bitcoin_core)
         self.download_button.setToolTip(
@@ -311,6 +329,7 @@ class App(QMainWindow):
             field.setProperty("state", state)
             field.style().unpolish(field)
             field.style().polish(field)
+            field.updateGeometry()
             field.update()
 
     def _mode_page(self):
@@ -874,6 +893,10 @@ class App(QMainWindow):
                              tooltip="Import a signed transaction and review it before broadcasting.", icon_key="import")
         imported.clicked.connect(self._import_psbt_dialog)
         page.addWidget(imported)
+        privacy = ActionRow("shield-check", "Network privacy", "Tor-only downloads and node connections.",
+                            tooltip="Change Tor-only mode. Disabling it exposes your public IP to services and peers.", icon_key="shield-check")
+        privacy.clicked.connect(self._privacy_dialog)
+        page.addWidget(privacy)
         appearance = ActionRow("dark", "Change appearance", "", tooltip="Switch light and dark mode.", icon_key="dark")
         appearance.clicked.connect(self._toggle_theme)
         page.addWidget(appearance)
@@ -897,6 +920,7 @@ class App(QMainWindow):
         form = QFormLayout()
         form.setSpacing(12)
         self.port = QLineEdit("8332")
+        self.port.setReadOnly(self.tor_enabled)
         self.port.setToolTip("The local Bitcoin Core RPC port. Connections always use 127.0.0.1.")
         form.addRow("Core port", self.port)
         content.addLayout(form)
@@ -1029,12 +1053,14 @@ class App(QMainWindow):
             return
         if self.core_download_process is not None:
             return
-        missing = [tool for tool in ("gpg", "wget") if not _system_tool(tool)]
+        if not self._ensure_tor(self.download_bitcoin_core):
+            return
+        missing = [tool for tool in ("gpg", "curl") if not _system_tool(tool)]
         if missing:
             QMessageBox.warning(
                 self,
                 "Verification tools required",
-                "Install the verification tools with `sudo apt install gnupg wget`, then try again.",
+                "Install the verification tools with `sudo apt install gnupg curl`, then try again.",
             )
             return
         self.core_download_stderr = ""
@@ -1050,7 +1076,10 @@ class App(QMainWindow):
             lambda code, status, p=process: self._core_download_finished(p, code, status)
         )
         process.errorOccurred.connect(lambda error, p=process: self._core_download_error(p, error))
-        process.start(sys.executable, ["-E", "-s", "-B", str(Path(__file__).with_name("core_download.py"))])
+        arguments = ["-E", "-s", "-B", str(Path(__file__).with_name("core_download.py"))]
+        if self.tor_enabled:
+            arguments += ["--tor-proxy", self.tor.proxy]
+        process.start(sys.executable, arguments)
 
     def _read_core_download_error(self, process):
         self.core_download_stderr = (self.core_download_stderr + bytes(process.readAllStandardError()).decode("utf-8", "replace"))[-6000:]
@@ -1107,7 +1136,7 @@ class App(QMainWindow):
             self.statusBar().showMessage("Starting a downloaded Core node is available on Linux.")
             return
         default_cookie = default_cookie_path()
-        if prefer_existing and default_cookie.is_file():
+        if not self.tor_enabled and prefer_existing and default_cookie.is_file():
             self._use_core_connection(default_cookie, 8332)
             self.connect()
             return
@@ -1118,10 +1147,22 @@ class App(QMainWindow):
             self.statusBar().showMessage("Download and verify Bitcoin Core from Welcome, then choose Online Node.")
             return
 
+        if not self._ensure_tor(lambda: self._start_managed_node(binary, prefer_existing=prefer_existing)):
+            return
         data_dir = managed_node_dir()
         cookie = data_dir / ".cookie"
-        self._use_core_connection(cookie, MANAGED_RPC_PORT)
-        if prefer_existing and cookie.is_file():
+        if self.managed_core_process is not None and self.managed_core_process.poll() is None:
+            self._use_core_connection(cookie, self.managed_rpc_port)
+            self.connect()
+            return
+        if self.tor_enabled:
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                self.managed_rpc_port = listener.getsockname()[1]
+        else:
+            self.managed_rpc_port = MANAGED_RPC_PORT
+        self._use_core_connection(cookie, self.managed_rpc_port)
+        if not self.tor_enabled and prefer_existing and cookie.is_file():
             self._set_core_status("Connecting to your Bitcoin Core node…")
             self.connect()
             return
@@ -1137,8 +1178,12 @@ class App(QMainWindow):
                 "-rpcallowip=127.0.0.1",
                 "-daemon=0",
                 "-server=1",
+                f"-rpcport={self.managed_rpc_port}",
                 f"-prune={PRUNE_TARGET_MIB}",
             ]
+            if self.tor_enabled:
+                arguments += core_tor_arguments(self.tor.proxy)
+            self.managed_node_tor_proxy = self.tor.proxy if self.tor_enabled else None
             with (data_dir / "companion-startup.log").open("ab", buffering=0) as log_file:
                 self.managed_core_process = subprocess.Popen(
                     [str(binary), *arguments],
@@ -1257,6 +1302,13 @@ class App(QMainWindow):
             return
         if not self.permanent_acknowledgement.isChecked():
             return
+        if self.tor_install_process is not None:
+            self.statusBar().showMessage("Wait for Tor installation to finish before cold setup.")
+            return
+        if not self._stop_managed_node():
+            return
+        self.tor_pending = None
+        self.tor.stop()
         if not self.dev_keep_network:
             try:
                 PermanentAirgap.activate()
@@ -1549,6 +1601,16 @@ class App(QMainWindow):
             return
         if self.busy:
             return
+        if not self._ensure_tor(self.connect):
+            return
+        if self.tor_enabled:
+            if self.managed_core_process is None or self.managed_core_process.poll() is not None:
+                self._start_managed_node(prefer_existing=False)
+                return
+            if self.managed_node_tor_proxy != self.tor.proxy:
+                self._set_core_status("Restart the managed node to apply Tor-only mode", "error")
+                return
+            self._use_core_connection(managed_node_dir() / ".cookie", self.managed_rpc_port)
         try:
             cookie_path = self.core_cookie_path or default_cookie_path()
             if not cookie_path.is_file() and sys.platform == "linux" and self._installed_core_binary():
@@ -1604,6 +1666,15 @@ class App(QMainWindow):
         if self.cold_required:
             self.service = None
             return
+        if self.tor_enabled:
+            try:
+                assert_core_tor(data["node"], self.tor.proxy)
+            except (ValueError, KeyError, TypeError) as exc:
+                self._stop_managed_node()
+                self._clear()
+                self._set_core_status("Core did not confirm Tor-only protection", "error")
+                self.statusBar().showMessage(str(exc))
+                return
         self.connection_fallback = False
         self.node_start_timer.stop()
         if data["chain"].get("chain") != "main":
@@ -1720,7 +1791,9 @@ class App(QMainWindow):
         self.page_label.setText(f"{len(self.rows)} entries  ·  page {self.skip // 100 + 1}")
         self._style_transaction_values()
         self.filter_history()
-        self.network.setText(f"●  Bitcoin Core · block {chain['blocks']:,}")
+        self.network.setText(("● Tor only" if self.tor_enabled and self.tor.bootstrapped else
+                              "○ Tor unavailable · no direct fallback" if self.tor_enabled else "● Direct connection")
+                             + f" · block {chain['blocks']:,}")
         if info.get("scanning"):
             message = "Core is rescanning. Wallet balances and activity may be incomplete."
         elif chain.get("initialblockdownload"):
@@ -1850,6 +1923,10 @@ class App(QMainWindow):
         self.show_text("About Core Companion", f"Core Companion {__version__}\n\nLinux release candidate · independent security review pending.\n\nBitcoin Core handles wallets, addresses and PSBT signing. The online view is watch-only. The cold signer uses a temporary Core process in RAM.\n\nPython / Qt Widgets. No browser engine, telemetry or local web server.")
 
     def closeEvent(self, event):
+        if self.tor_install_process is not None:
+            self.statusBar().showMessage("Wait for Tor installation to finish before closing.")
+            event.ignore()
+            return
         if self.core_download_process is not None:
             answer = QMessageBox.question(
                 self,
@@ -1871,6 +1948,11 @@ class App(QMainWindow):
             event.ignore()
             return
         if not self.cold_session:
+            if self.tor_enabled and not self._stop_managed_node():
+                event.ignore()
+                return
+            self.tor_pending = None
+            self.tor.stop()
             event.accept()
             return
         answer = QMessageBox.warning(
@@ -2113,10 +2195,198 @@ class App(QMainWindow):
             fee=fee, allowed=acceptance.get("allowed") is True)
 
 
+    def _privacy_toggled(self, enabled):
+        if enabled == self.tor_enabled:
+            return
+        if not self._allow_online() or self.busy or self.core_download_process is not None or self.tor_install_process is not None:
+            self.statusBar().showMessage("Finish the current operation before changing network privacy.")
+            accepted = False
+        else:
+            accepted = True
+            if not enabled:
+                accepted = QMessageBox.warning(self, "Disable Tor protection?",
+                    "Core downloads and blockchain connections will use the internet directly. "
+                    "Download services and Bitcoin peers can see your public IP and link activity to it. "
+                    "The managed node will stop; reconnect to use the new setting.",
+                    QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+                    QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes
+            if accepted:
+                accepted = self._stop_managed_node()
+        if accepted:
+            self.tor_pending = None
+            self.tor.stop()
+            self.disconnect()
+            self.tor_enabled = enabled
+            self.port.setReadOnly(enabled)
+            settings = QSettings("CoreCompanion", "CoreCompanion")
+            settings.setValue("network/torOnly", enabled)
+            settings.sync()
+            self._set_core_status("Tor only selected" if enabled else "Direct connection selected")
+            self.statusBar().showMessage("Network privacy saved. Connect when ready.")
+        self.tor_choice.blockSignals(True)
+        self.tor_choice.setChecked(self.tor_enabled)
+        self.tor_choice.blockSignals(False)
+
+    def _privacy_dialog(self):
+        if not self._allow_online():
+            return
+        dialog, layout = self._dialog("Network privacy", "Choose how this installation connects.", size=(620, 360))
+        choice = QCheckBox("Tor only (recommended)")
+        choice.setChecked(self.tor_enabled)
+        choice.setToolTip(self.tor_choice.toolTip())
+        layout.addWidget(choice)
+        text = label("Downloads, signing keys and the managed node use Tor. If Tor stops, connections stop. "
+                     "Other apps and separately running nodes keep their own settings.", "Muted")
+        text.setWordWrap(True)
+        layout.addWidget(text)
+        layout.addStretch()
+        row = QHBoxLayout()
+        row.addWidget(button("Cancel", dialog.reject))
+        row.addStretch()
+        def apply():
+            self._privacy_toggled(choice.isChecked())
+            if self.tor_enabled == choice.isChecked():
+                dialog.accept()
+        row.addWidget(button("Apply", apply, True))
+        layout.addLayout(row)
+        self._dialog_help(dialog)
+        dialog.exec()
+
+    def _ensure_tor(self, action):
+        if not self.tor_enabled:
+            return True
+        if not self._allow_online() or self.cold_session:
+            return False
+        if self.tor.bootstrapped:
+            return True
+        self.tor_pending = action
+        if self.tor_install_process is not None:
+            return False
+        if not _system_tool("tor") or not _system_tool("curl"):
+            self._install_tor()
+            return False
+        try:
+            self.tor.start()
+            self._set_core_status("Connecting to Tor…")
+            self.network.setText("○ Tor connecting · no direct fallback")
+        except (ValueError, OSError) as exc:
+            self.tor_pending = None
+            QMessageBox.warning(self, "Tor could not start", str(exc))
+        return False
+
+    def _tor_ready(self):
+        if not self._allow_online() or not self.tor_enabled:
+            self.tor.stop()
+            self.tor_pending = None
+            return
+        action, self.tor_pending = self.tor_pending, None
+        self._set_core_status("Tor connected · no direct fallback")
+        self.network.setText("● Tor only")
+        if action:
+            QTimer.singleShot(0, action)
+
+    def _tor_unavailable(self, message):
+        self.tor_pending = None
+        if self.tor_enabled:
+            if self.core_download_process is not None:
+                self.cancel_core_download()
+            self._set_core_status("Tor unavailable · direct access blocked", "error")
+            self.network.setText("○ Tor unavailable · no direct fallback")
+            self.statusBar().showMessage(message)
+
+    def _install_tor(self):
+        if not self._allow_online():
+            return
+        if sys.platform != "linux" or not _system_tool("apt-get") or not _system_tool("pkexec"):
+            self.tor_pending = None
+            QMessageBox.warning(self, "Tor installation", "Automatic installation requires Debian, apt and administrator authorization.")
+            return
+        answer = QMessageBox.question(self, "Install Tor?",
+            "Tor or curl was not found. Install them from this computer's signed Debian repositories? "
+            "This bootstrap uses a direct connection and requires administrator authorization. "
+            "Bitcoin downloads and node startup will wait until Tor is connected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            self.tor_pending = None
+            return
+        self._tor_install_stage("update")
+
+    def _tor_install_stage(self, stage):
+        if not self._allow_online():
+            self.tor_pending = None
+            return
+        process = QProcess(self)
+        self.tor_install_process = process
+        self.tor_install_output = ""
+        environment = QProcessEnvironment()
+        environment.insert("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        environment.insert("LANG", "C")
+        for key in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"):
+            if os.environ.get(key):
+                environment.insert(key, os.environ[key])
+        process.setProcessEnvironment(environment)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self._tor_install_read(process))
+        process.finished.connect(lambda code, _: self._tor_install_finished(process, stage, code))
+        process.errorOccurred.connect(lambda error: self._tor_install_finished(process, stage, -1)
+                                     if error == QProcess.ProcessError.FailedToStart else None)
+        arguments = [_system_tool("apt-get"), "-o", "Acquire::AllowInsecureRepositories=false",
+                     "-o", "Acquire::AllowDowngradeToInsecureRepositories=false",
+                     "-o", "APT::Get::AllowUnauthenticated=false",
+                     "-o", "APT::Update::Error-Mode=any"]
+        arguments += ["update"] if stage == "update" else ["-y", "--no-install-recommends", "install", "tor", "curl"]
+        self._set_core_status("Preparing Tor installation…" if stage == "update" else "Installing Tor and curl…")
+        process.start(_system_tool("pkexec"), arguments)
+
+    def _tor_install_read(self, process):
+        if process is self.tor_install_process:
+            self.tor_install_output = (self.tor_install_output + bytes(process.readAllStandardOutput()).decode("utf-8", "replace"))[-6000:]
+
+    def _tor_install_finished(self, process, stage, code):
+        if process is not self.tor_install_process:
+            return
+        self._tor_install_read(process)
+        self.tor_install_process = None
+        process.deleteLater()
+        if code:
+            self.tor_pending = None
+            self._set_core_status("Tor installation did not finish · Bitcoin traffic blocked", "error")
+            QMessageBox.warning(self, "Tor was not installed", self.tor_install_output[-2000:] or "Administrator authorization or installation failed.")
+            return
+        if stage == "update":
+            self._tor_install_stage("install")
+            return
+        if not _system_tool("tor") or not _system_tool("curl"):
+            self.tor_pending = None
+            self._set_core_status("Tor is still unavailable · Bitcoin traffic blocked", "error")
+            return
+        action = self.tor_pending
+        if action:
+            self._ensure_tor(action)
+
+    def _stop_managed_node(self):
+        process = self.managed_core_process
+        if process is not None and process.poll() is None:
+            self._set_core_status("Stopping Bitcoin Core safely…")
+            try:
+                process.terminate()
+                process.wait(timeout=15)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                self.statusBar().showMessage("Core is still stopping. Wait, then try again; network privacy has not changed.")
+                return False
+        self.managed_core_process = None
+        self.managed_node_tor_proxy = None
+        self.node_start_timer.stop()
+        return True
+
     def _lock_cold_installation(self):
         self.permanent_cold = PermanentAirgap.is_committed()
         self.cold_required = True
         self.online_choice.setEnabled(False)
+        self.tor_choice.setEnabled(False)
         self.download_button.setEnabled(False)
         self.connection.hide()
         self.sync_timer.stop()
@@ -2174,14 +2444,8 @@ def main(argv=None):
     window.show()
     if window.cold_required:
         window._set_core_status("Permanent cold installation · online functions disabled")
-    elif default_cookie_path().is_file():
-        window._use_core_connection(default_cookie_path(), 8332)
-        QTimer.singleShot(0, window.connect)
-    elif sys.platform == "linux" and (managed_node_dir() / ".cookie").is_file():
-        window._use_core_connection(managed_node_dir() / ".cookie", MANAGED_RPC_PORT)
-        QTimer.singleShot(0, window.connect)
-    elif sys.platform == "linux" and window._installed_core_binary():
-        window._set_core_status("Bitcoin Core is ready. Choose Online Node to start syncing.")
+    elif window._installed_core_binary() or default_cookie_path().is_file():
+        window._set_core_status("Choose network privacy, then connect to Bitcoin Core.")
     else:
-        window._set_core_status("Bitcoin Core not found. Start it or download it below.", "error")
+        window._set_core_status("Choose network privacy, then download and verify Core.")
     application.exec()

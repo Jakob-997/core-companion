@@ -1,5 +1,6 @@
 """Download and verify the official Bitcoin Core Linux release."""
 
+import argparse
 import json
 import os
 import platform
@@ -10,16 +11,17 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
 from pathlib import Path, PurePosixPath
 
 if __package__:
     from .linux_cold import SYSTEM_PATH, _system_tool
     from .permanent_airgap import PermanentAirgap
+    from .network_privacy import checked_proxy, curl_command
 else:
     from linux_cold import SYSTEM_PATH, _system_tool
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from companion.permanent_airgap import PermanentAirgap
+    from companion.network_privacy import checked_proxy, curl_command
 
 
 DOWNLOAD_PAGE = "https://bitcoincore.org/en/download/"
@@ -38,7 +40,7 @@ TRUSTED_RELEASE_SIGNERS = (
     "ED9BDF7AD6A55E232E84524257FF9BDBCC301009",
     "A0083660F235A27000CD3C81CE6EC49945C17EA6",
 )
-KEYSERVER = "hkps://keys.openpgp.org"
+KEYSERVER = "https://keys.openpgp.org/vks/v1/by-fingerprint/"
 MAX_FILE_SIZE = 1024 * 1024 * 1024
 MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
 active_verifier = None
@@ -75,18 +77,41 @@ def _run_gpg(args, environment, input_text=None):
     return code, output, error
 
 
-def _prepare_signing_keyring(home):
+def _download(url, destination, proxy=None, *, limit=2 * 1024 * 1024, timeout=120):
+    global active_verifier
+    if PermanentAirgap.is_committed():
+        raise CoreDownloadError("Downloads are forbidden on a permanently offline computer.")
+    try:
+        command = curl_command(url, destination, proxy=proxy, limit=limit, timeout=timeout)
+        active_verifier = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
+            env={"PATH": SYSTEM_PATH, "LANG": "C", "LC_ALL": "C"})
+        _, error = active_verifier.communicate(timeout=timeout + 5)
+        code = active_verifier.returncode
+        active_verifier = None
+        if code or not 0 < destination.stat().st_size <= limit:
+            raise CoreDownloadError("HTTPS download failed" + (" over Tor; no direct fallback" if proxy else "")
+                                    + ". " + error.decode("utf-8", "replace")[-400:])
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        _terminate_active_process()
+        raise CoreDownloadError("Download failed; the selected network route was not changed.") from exc
+
+
+def _prepare_signing_keyring(home, proxy=None):
     home.mkdir(mode=0o700)
-    environment = os.environ.copy()
-    environment["PATH"] = SYSTEM_PATH
-    environment["GNUPGHOME"] = str(home)
+    # Local GPG verification must never retrieve keys through dirmngr.
+    (home / "gpg.conf").write_text("no-auto-key-retrieve\nauto-key-locate clear\nno-auto-key-import\n")
+    environment = {"PATH": SYSTEM_PATH, "LANG": "C", "LC_ALL": "C", "GNUPGHOME": str(home)}
     trusted = []
     for fingerprint in TRUSTED_RELEASE_SIGNERS:
-        code, _, _ = _run_gpg(
-            ["--keyserver", KEYSERVER, "--recv-keys", fingerprint], environment
-        )
-        if code:
+        key = home.parent / (fingerprint + ".asc")
+        try:
+            _download(KEYSERVER + fingerprint, key, proxy)
+        except CoreDownloadError:
             print(f"Could not retrieve pinned signer {fingerprint[-8:]}; trying the remaining keys.", file=sys.stderr, flush=True)
+            continue
+        code, _, _ = _run_gpg(["--import", str(key)], environment)
+        if code:
             continue
         code, output, _ = _run_gpg(["--with-colons", "--fingerprint", fingerprint], environment)
         if code == 0 and any(
@@ -94,10 +119,8 @@ def _prepare_signing_keyring(home):
             for fields in (line.split(":") for line in output.splitlines())
         ):
             trusted.append(fingerprint)
-
     if len(trusted) < MINIMUM_TRUSTED_SIGNATURES:
         raise CoreDownloadError("Could not retrieve three pinned Bitcoin Core signing keys.")
-
     ownertrust = "".join(f"{fingerprint}:6:\n" for fingerprint in trusted)
     code, _, _ = _run_gpg(["--import-ownertrust"], environment, ownertrust)
     if code:
@@ -124,15 +147,11 @@ def _stop_verifier(signum, _frame):
     raise SystemExit(128 + signum)
 
 
-def _latest_version():
-    request = urllib.request.Request(
-        DOWNLOAD_PAGE, headers={"User-Agent": "Core Companion"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            page = response.read(2 * 1024 * 1024).decode("utf-8", "replace")
-    except Exception as exc:
-        raise CoreDownloadError("Could not reach the Bitcoin Core download page.") from exc
+def _latest_version(proxy=None):
+    with tempfile.TemporaryDirectory(prefix="core-companion-version-") as directory:
+        page_file = Path(directory) / "download.html"
+        _download(DOWNLOAD_PAGE, page_file, proxy)
+        page = page_file.read_text(encoding="utf-8", errors="replace")
     visible = re.sub(r"<[^>]+>", " ", page)
     match = re.search(r"Latest version:\s*([0-9]+(?:\.[0-9]+){1,2})\b", visible)
     if not match:
@@ -246,19 +265,18 @@ def _extract_verified_archive(archive, version, install_root):
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def download_and_verify():
+def download_and_verify(proxy=None):
     if PermanentAirgap.is_committed():
         raise CoreDownloadError("Downloads are forbidden on a permanently offline computer. Use verified offline media.")
     global active_verifier
-    if not _system_tool("gpg") or not _system_tool("wget"):
-        raise CoreDownloadError("Install GPG and wget, then try again.")
+    if proxy is not None:
+        checked_proxy(proxy)
+    if not _system_tool("gpg") or not _system_tool("curl"):
+        raise CoreDownloadError("Install GPG and curl, then try again.")
     if not VERIFIER.is_file():
         raise CoreDownloadError("Bitcoin Core's official verification script is missing.")
 
-    architecture, platform_filter = _linux_target()
-    version = _latest_version()
-    target = f"{version}-{platform_filter}"
-    expected_archive = f"bitcoin-{version}-{architecture}-linux-gnu.tar.gz"
+    architecture, _ = _linux_target()
     temp_root = Path(tempfile.mkdtemp(prefix="core-companion-verify-"))
     temp_root.chmod(0o700)
     gpg_home = temp_root / "gnupg"
@@ -267,17 +285,19 @@ def download_and_verify():
         signal.SIGINT: signal.signal(signal.SIGINT, _stop_verifier),
     }
     try:
-        environment = _prepare_signing_keyring(gpg_home)
-        environment["TMPDIR"] = str(temp_root)
-        command = [
-            sys.executable,
-            str(VERIFIER),
-            "--min-good-sigs",
-            str(MINIMUM_TRUSTED_SIGNATURES),
-            "--json",
-            "pub",
-            target,
-        ]
+        version = _latest_version(proxy)
+        expected_archive = f"bitcoin-{version}-{architecture}-linux-gnu.tar.gz"
+        work_dir = temp_root / "release"
+        work_dir.mkdir()
+        release_url = f"https://bitcoincore.org/bin/bitcoin-core-{version}/"
+        for name in ("SHA256SUMS", "SHA256SUMS.asc"):
+            _download(release_url + name, work_dir / name, proxy, limit=4 * 1024 * 1024)
+        environment = _prepare_signing_keyring(gpg_home, proxy)
+        signers = _verified_signers(work_dir, environment)
+        _download(release_url + expected_archive, work_dir / expected_archive, proxy,
+                  limit=MAX_FILE_SIZE, timeout=7200)
+        command = [sys.executable, "-E", "-s", str(VERIFIER), "--min-good-sigs",
+                   str(MINIMUM_TRUSTED_SIGNATURES), "--json", "bin", "SHA256SUMS", expected_archive]
         print(
             f"Checking the signed Core {version} release and downloading {architecture} Linux files…",
             file=sys.stderr,
@@ -285,7 +305,7 @@ def download_and_verify():
         )
         active_verifier = subprocess.Popen(
             command,
-            cwd=temp_root,
+            cwd=work_dir,
             env=environment,
             stdout=subprocess.PIPE,
             start_new_session=True,
@@ -310,8 +330,6 @@ def download_and_verify():
         if expected_archive not in verified:
             raise CoreDownloadError("The verifier did not confirm the expected Linux archive.")
 
-        work_dir = temp_root / f"bitcoin_verify_binaries.{target}"
-        signers = _verified_signers(work_dir, environment)
         archive = (work_dir / expected_archive).resolve()
         if archive.parent != work_dir.resolve() or not archive.is_file():
             raise CoreDownloadError("The verified Bitcoin Core archive is missing.")
@@ -348,8 +366,11 @@ def download_and_verify():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tor-proxy", help="local Tor SOCKS proxy; never falls back to direct")
+    args = parser.parse_args()
     try:
-        result = download_and_verify()
+        result = download_and_verify(args.tor_proxy)
     except CoreDownloadError as exc:
         result = {"ok": False, "error": str(exc)}
     except Exception:

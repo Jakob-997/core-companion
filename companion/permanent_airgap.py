@@ -28,6 +28,7 @@ class PermanentAirgap:
         "systemd-networkd.service", "systemd-networkd.socket", "systemd-networkd-wait-online.service",
         "networking.service", "wpa_supplicant.service", "iwd.service", "connman.service",
         "bluetooth.service", "dhcpcd.service", "dhcpcd5.service",
+        "tor.service", "tor@default.service",
         "dbus-org.freedesktop.NetworkManager.service", "dbus-org.freedesktop.network1.service",
         "dbus-fi.w1.wpa_supplicant1.service",
         "nftables.service", "firewalld.service", "ufw.service",

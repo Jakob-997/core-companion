@@ -18,7 +18,7 @@ Use Python 3.11–3.15 and a normal desktop user. Do not run the app as root.
 
 ```sh
 sudo apt update
-sudo apt install -y python3-venv gnupg wget pkexec iproute2 nftables rfkill util-linux zbar-tools libegl1 libxcb-cursor0
+sudo apt install -y python3-venv gnupg curl pkexec iproute2 nftables rfkill util-linux zbar-tools libegl1 libxcb-cursor0
 python3 install.py
 ./core-companion
 ```
@@ -51,10 +51,28 @@ into a temporary GPG keyring; your own keyring is untouched. Cold mode requires
 Core 32.1+. Downloading Core does not start blockchain networking.
 
 The managed online node uses loopback RPC, automatic cookie authentication and
-a 10,000 MiB pruning target. It keeps syncing after the interface closes. An
-existing node in the standard Core directory is tried first. Only loaded
+a 10,000 MiB pruning target. Tor-only nodes stop safely when the interface
+closes; direct-mode nodes may keep syncing. An existing node in the standard Core directory can be used in direct mode. Tor-only mode starts its own constrained node. Only loaded
 wallets with private keys disabled appear in the online view. A pruned node
 cannot rescan discarded blocks when importing an older wallet.
+
+## Tor-only privacy
+
+Choose **Tor only** on Welcome before connecting or downloading Core; it is
+recommended and enabled by default. Core downloads (including signing keys)
+and the managed node's blockchain sync use Tor. If Tor fails, they stop without
+a direct fallback. Local wallet RPC stays on loopback.
+
+If Tor or curl is missing, the app offers to install it through signed distro
+repositories. This one bootstrap step may use a direct connection and needs
+administrator authorization; the prompt explains this before proceeding.
+Bitcoin downloads and node startup wait for Tor to connect.
+
+Use **Tools & Settings → Network privacy** to change the setting. Disabling Tor
+warns about exposing your public IP, stops the managed node and disconnects the
+wallet. Reconnect to apply the new choice. Other applications and separately
+running nodes retain their own settings. This is not a system-wide Tor gateway.
+A permanently offline cold signer cannot enable Tor or install network tools.
 
 ## Permanent air gap
 

@@ -73,3 +73,10 @@ supported release targets. Existing validation evidence and its limits are in
 [AUDIT.md](AUDIT.md).
 
 Permanent offline release acceptance must cover first-time authorization, reboot with the guard before network managers, radio/NIC hot-plug, suspend/resume, failed setup, tamper refusal and offline updates. Perform these on a disposable Debian VM with no real keys. A committed installation must reject the development flag and all online paths. Never reconnect a real signer to perform release acceptance. See PERMANENT_AIRGAP.md.
+
+Tor acceptance must cover missing-tool installation, administrator rejection,
+repository verification failure, bootstrap failure, Tor loss during HTTPS and
+sync, stop/restart with a changed preference, refused external-node adoption,
+and the disable-Tor warning. Confirm no clearnet/DNS traffic from Core or curl
+in a packet-captured disposable Debian environment; other apps and the disclosed
+Tor installation bootstrap are outside the Tor-only application route.

@@ -29,3 +29,13 @@ certification promise is implied by this development repository.
 The online send path delegates funding, decoding, finalization, mempool checks and broadcasting to Core. Broadcast requires a separate explicit review action. Public-key version conversion (SLIP132) is transport handling only; the app does not derive public keys outside Core. LifeHash is a visual recognition aid, never a wallet ownership or policy check.
 
 Permanent-mode details and physical-air-gap limits are in [PERMANENT_AIRGAP.md](PERMANENT_AIRGAP.md). Never reconnect a real signer. Physically remove networking hardware for the strongest safeguard. Software cannot guarantee isolation from compromised administrators or firmware.
+
+Tor-only mode uses Core's native proxy/onlynet controls and curl's explicit
+SOCKS5 hostname proxy for every Bitcoin-related HTTPS request. Automatic GPG
+key retrieval is disabled; the upstream verifier runs locally. It has no direct
+fallback. Tor is a network-privacy option, not an anonymity guarantee: local
+RPC stays on loopback, and other apps/external nodes are outside its scope.
+Installing missing Tor/curl is a disclosed direct bootstrap using authenticated
+distro repositories. Dependency installation through pip is a separate installer
+step, not routed by the app's Tor preference. A committed cold computer blocks
+all Tor/install paths and must never be reconnected.

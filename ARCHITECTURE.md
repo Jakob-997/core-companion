@@ -75,36 +75,56 @@ Keep Core RPC bound to loopback and do not expose it to a network.
 
 ## Bitcoin Core download verification
 
-The Linux download action obtains the current stable version from the official
-download page and invokes the unchanged Bitcoin Core v32.1
-`contrib/verify-binaries/verify.py`. It downloads eight pinned public signing
-keys into a temporary GPG home, checks every full fingerprint against the
-allowlist in `core_download.py`, and marks only those keys trusted in that
-temporary home. The verifier checks the signed `SHA256SUMS` files from both
-official hosts, requires at least three accepted signatures, downloads the
-selected Linux archive, and checks its SHA-256 hash. The user's personal GPG
-keyring is not modified. Companion additionally verifies the checksum signature
-status directly with GPG, requiring three distinct non-expired, non-revoked
-pinned primary signers. Repeated signature packets do not increase this count.
+The Linux download action obtains the stable version from Core's official page.
+All HTTPS requests use system curl with an explicit selected route, HTTPS-only
+redirects, size/time limits and no inherited curl configuration or proxy bypass.
+This includes the version page, release checksums/signatures, archive and pinned
+public keys from keys.openpgp.org's HTTPS fingerprint API. Keys are imported into
+a private temporary GPG home with automatic key retrieval disabled; each full
+fingerprint is checked and only pinned keys receive temporary ownertrust.
+Companion first requires three distinct valid pinned signers for SHA256SUMS.
+It then invokes the unchanged Core v32.1 contrib/verify-binaries/verify.py in
+local bin mode to verify the signatures and archive SHA-256. GPG and the
+upstream verifier do not perform downloads. The user's GPG keyring is untouched.
+Repeated signature packets do not increase the threshold.
 The pinned set was confirmed against Bitcoin Core
 v32.1's official `SHA256SUMS.asc`; signer rotation requires a reviewed app
 update. Only after verification succeeds does the app install the package. The extractor rejects
 absolute or parent paths, links, special files and unexpectedly large members,
 and stages files before placing the completed directory in the app's data
-folder. The upstream verifier requires `gpg` and `wget`; it and its MIT license
+folder. The download requires system curl and GPG; the unchanged verifier and its MIT license
 are under `companion/vendor/bitcoin-core/`.
 
 When Online Node is selected, Linux starts the verified Core binary in a
-separate app-managed data directory under `~/.local/share/core-companion/`.
-The node enables RPC only on loopback, uses its cookie from that data directory,
-and starts with `-prune=10000`. It runs independently after the UI closes and
-reconnects on the next app launch. Downloading Core does not start the node;
-cold-signer setup therefore does not silently bring up online networking. If a
-Core cookie exists in the standard user data directory, Companion tries that
-node first. If that connection is stale or fails, selecting Online Node starts
-its managed node. A stale connection record does not start online peer
-networking before the user chooses Online Node. Managed startup waits are
-bounded, and a stale managed cookie no longer causes an endless reconnect loop.
+separate app-managed directory under ~/.local/share/core-companion. RPC is
+loopback-only, cookie-authenticated, and the default pruning target is 10000 MiB.
+Welcome offers network privacy before any connection or node startup. Tor-only
+mode starts an unprivileged private Tor client and waits for bootstrap before
+any Bitcoin download or managed node launch. It never adopts an external Core
+node or an old cookie as evidence of Tor configuration. A fresh local RPC port
+is assigned to the managed Tor node, whose getnetworkinfo proxy/limited-network
+settings are checked before accepting the connection.
+
+Core receives onlynet=onion, proxy/onion, stream-isolation, no DNS/DNS seeds,
+fixed onion seeds, no listening/discovery and no NAT port mapping. curl uses
+socks5h so hostnames are resolved through Tor, explicitly clearing NO_PROXY.
+Proxy failures never trigger a direct retry. Tor loss leaves the node unable
+to connect directly. Tor-only Core is stopped before Tor on app closure or a
+privacy change. Direct-mode Core may continue independently as before.
+
+The Tor checkbox is also available under Tools & Settings / Network privacy.
+Disabling it warns that peers/download services can see the public IP; Cancel
+is the default. Changing privacy stops the managed node, clears the connection
+and requires the user to reconnect. External nodes/other applications are not
+changed. This is application routing, not a machine-wide Tor firewall.
+
+Missing Tor/curl offers a signed distro-package installation through fixed
+system apt-get and pkexec, with insecure/unauthenticated repositories forbidden.
+This explicit bootstrap exception uses a direct repository connection; the app
+explains it and waits for consent and administrator authorization. No Bitcoin
+traffic starts until installation and Tor bootstrap succeed. Failed/cancelled
+installation never switches the selected route. Permanently cold computers
+cannot install/start Tor; their network policy also masks Tor system services.
 
 ## Seed and key flow
 

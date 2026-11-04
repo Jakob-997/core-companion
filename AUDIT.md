@@ -222,3 +222,51 @@ installer argv. Root script syntax and systemd service/timer verification pass.
 No permanent policy, service or radio setting was installed on the review host.
 Real Debian boot/reboot, authorization and hardware acceptance remain pending;
 software checks are not a physical air-gap guarantee.
+
+
+## Tor-only online routing (2026-11-03)
+
+The Welcome screen now offers Tor before any node startup or Bitcoin download.
+It is the default choice, persists in settings and can be disabled only after
+an IP-exposure warning (Cancel is the default). Missing Tor/curl offers a signed
+apt installation with an explicit direct-bootstrap disclosure and administrator
+authorization. Failed install/bootstrap never selects a direct route.
+
+No Python dependencies were added. A private system-Tor process owns onion
+routing; curl owns HTTPS/SOCKS and remote hostname resolution; Core owns Bitcoin
+P2P. The unchanged upstream release verifier now operates locally in bin mode.
+All metadata, pinned signing keys and archive transfers share the selected
+transport. Automatic GPG key retrieval is disabled. The three distinct pinned signer threshold and archive checks remain mandatory.
+
+Validation evidence:
+
+- Real Core 32.1 accepted the exact Tor-only flags in an isolated network
+  namespace, confirmed the required proxy and limited networks via local RPC,
+  advertised no listening address and had no peers with its proxy absent.
+- Extracted distro Tor 0.4.9.11 accepted the exact launch configuration and
+  bootstrapped to 100% as an unprivileged private review client. Core's official
+  release page, pinned keys and checksum/signature files were fetched through
+  it; four distinct pinned release signatures verified for 32.1.
+- Real curl against a local SOCKS fixture sent the unresolved destination
+  hostname despite NO_PROXY=* and failed when the proxy refused the connection.
+- Qt fault fixtures cover no automatic startup, bootstrap gating, missing-tool
+  prompts, both apt stages/authentication flags, installation failure, refusal
+  of the disable-Tor warning, transport propagation to downloads and local-only
+  GPG imports, Tor-loss cancellation and permanent-cold rejection. Initial
+  fixtures ran on Linux; the extended UI/installer fixtures also passed in the
+  existing Windows Qt 6.11.3 environment with Linux/tool calls mocked. The Linux
+  review VM subsequently failed to restart; no VM reset was performed.
+- Welcome fits 980x680 and 1280x850; the compact status panel and privacy choice
+  were visually checked with a native review font. No installer/service was
+  actually installed on the review host and no real wallet keys were used.
+
+Still required: actual Debian administrator/apt acceptance, packet capture
+through Tor loss/restart, long-running onion-peer synchronization and the
+existing independent security/release review. This is application-level Tor
+routing, not a machine-wide Tor gateway or an anonymity guarantee. Committed
+cold machines refuse Tor and apt installation; their policy also masks Tor's
+system services.
+
+Primary references: [Core 32.1 Tor support](https://github.com/bitcoin/bitcoin/blob/v32.1/doc/tor.md),
+[curl proxy and configuration semantics](https://curl.se/docs/manpage.html),
+and [Debian Tor manual](https://manpages.debian.org/trixie/tor/tor.1.en.html).
