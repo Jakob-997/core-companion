@@ -270,3 +270,32 @@ system services.
 Primary references: [Core 32.1 Tor support](https://github.com/bitcoin/bitcoin/blob/v32.1/doc/tor.md),
 [curl proxy and configuration semantics](https://curl.se/docs/manpage.html),
 and [Debian Tor manual](https://manpages.debian.org/trixie/tor/tor.1.en.html).
+
+
+## Multisig origin compatibility (2026-11-03)
+
+Removed the BIP87-only cosigner filter. Inputs must contain a mainnet account
+xpub and origin, but no purpose/coin/account path is mandated. Core's
+getdescriptorinfo validates a ranged public wrapper and supplies the canonical
+key expression. Malformed/private/non-ranged/unsolvable results are rejected.
+The wizard still applies its receive/change suffixes and checks the final
+private/public multisig descriptors through Core.
+
+The local derivation path is editable before signer preparation. BIP87 remains
+the initial default; BIP48, custom and root paths are delegated to derivehdkey.
+The selected path is retained and used again for private account derivation.
+The wallet summary no longer labels mixed/custom policies as BIP87. Duplicate
+xpub rejection, private imports and public-only exports remain in place.
+
+Fixture checks passed for BIP48/BIP87/custom/root origins, apostrophe notation,
+Core rejection propagation, malformed responses, duplicated xpubs under changed
+origins, duplicated local keys, mixed-policy receive/change construction, local
+path retention and private/public separation. Native Qt checks confirm the path
+field appears only for multisig, reaches preparation and fits 980x680 and
+1280x850. No real keys or node were used. The previously failed Linux review VM
+remains unavailable, so a new real-Core mixed-path creation/signing acceptance
+run remains required; this validation does not claim it was performed.
+
+Origin information is supplied metadata, not cryptographic proof of another
+signer's seed/path. [BIP380](https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki)
+defines the general origin/key syntax; no BIP87 restriction is implied by it.

@@ -22,7 +22,7 @@ call that RPC instead of adding parallel wallet logic.
 - `install.py`, `core-companion`: hash-locked dependency installation and the
   Linux desktop launcher. `tools/build_release.py` builds the source archive.
 - `linux_cold.py`: permanent network policy verification and temporary swap disable/restore.
-- `offline_core.py`: isolated Core lifecycle, BIP87 descriptors, address checks,
+- `offline_core.py`: isolated Core lifecycle, multisig descriptors, address checks,
   watch-only export, and PSBT review/signing.
 - `seed.py`: temporary-wallet hashing, entropy mixing, BIP39, and BIP32 root.
 - `cold_ui.py`: cold-signer screens; it delegates key and wallet operations to
@@ -144,7 +144,11 @@ cannot install/start Tor; their network policy also masks Tor system services.
    `to_hd_master_key()` produces the BIP32 root xprv. Bitcoin Core imports that
    root with `addhdkey` and owns all child-key and descriptor derivation.
 5. For multisig, Core derives the local signer account at
-   `m/87h/0h/0h` first. The UI shares its public account key before asking for
+   a user-selected path; `m/87h/0h/0h` is only the initial default. Cosigner
+   xpubs retain their actual origin paths, including BIP48 and custom paths.
+   A ranged public descriptor is passed to getdescriptorinfo for each key;
+   Core validates and canonicalizes origins and extended keys. The UI shares
+   the local public account key before asking for
    other signers, and clears the phrase/passphrase fields. Once the other keys
    are collected, the app builds receive and change `wsh(sortedmulti(...))`
    descriptors with full key origins, asks Core to checksum and import them,
@@ -231,3 +235,13 @@ files, masks, timer and current links/radios before private operations. The app
 locks online paths and startup connections once committed. The development flag
 cannot bypass an existing machine-wide commitment. Installer and Core downloader
 also enforce offline operation. Hardware removal remains the strongest safeguard.
+
+
+Multisig origin validation does not establish that a supplied fingerprint/path
+actually belongs to another signer's seed. It validates public key encoding and
+descriptor syntax through Core. Keep the complete public wallet policy and
+independently compare receiving addresses across signers. Incoming fields accept
+account xpubs with origins, not already-ranged branch descriptors: the wizard
+adds /0/* and /1/* itself. Duplicate xpub rejection is independent of origin
+labels/paths. The selected local path is retained during preparation and reused
+for private derivation; it cannot silently fall back to the default at import.

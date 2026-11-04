@@ -21,21 +21,32 @@ from .permanent_airgap import PermanentAirgap
 from .public_wallet import combined_public_descriptor
 
 
-_BIP87_ACCOUNT_KEY = re.compile(
-    r"^\[([0-9a-fA-F]{8})/(?:87h|87')/(?:0h|0')/(?:0h|0')\](xpub[1-9A-HJ-NP-Za-km-z]+)$"
-)
+DEFAULT_MULTISIG_PATH = "m/87h/0h/0h"
 
 
-def normalize_bip87_account_key(value):
-    """Accept only a mainnet xpub with an explicit BIP87 origin path."""
-    match = _BIP87_ACCOUNT_KEY.fullmatch("".join(str(value).split()))
-    if not match:
+def normalize_account_key(rpc, value):
+    """Core validates the xpub and origin; no derivation convention is required."""
+    if not isinstance(value, str) or len(value) > 4096:
+        raise ColdSetupError("Enter a public xpub with its origin fingerprint and path.")
+    value = "".join(value.split())
+    if not re.fullmatch(r"\[[^\[\]]+\]xpub[1-9A-HJ-NP-Za-km-z]+", value):
         raise ColdSetupError(
-            "Each signer must provide an xpub with origin fingerprint and path "
-            "[fingerprint/87h/0h/0h]."
+            "Each signer needs an xpub with its origin, for example "
+            "[fingerprint/48h/0h/0h/2h]xpub…"
         )
-    fingerprint, xpub = match.groups()
-    return f"[{fingerprint.lower()}/87h/0h/0h]{xpub}"
+    prefix, suffix = "wpkh(", "/0/*)"
+    try:
+        checked = rpc.call("getdescriptorinfo", [prefix + value + suffix])
+    except CoreError as exc:
+        raise ColdSetupError(f"Core rejected the signer xpub or origin.\n\n{exc}") from None
+    if not isinstance(checked, dict) or not isinstance(checked.get("descriptor"), str):
+        raise ColdSetupError("Core returned an invalid signer-key description.")
+    descriptor = checked.get("descriptor", "").split("#", 1)[0]
+    if (checked.get("hasprivatekeys") is not False or checked.get("isrange") is not True
+            or checked.get("issolvable") is not True
+            or not descriptor.startswith(prefix) or not descriptor.endswith(suffix)):
+        raise ColdSetupError("Core could not validate a ranged public signer key.")
+    return descriptor[len(prefix):-len(suffix)]
 
 
 class ColdCoreRPC(CoreRPC):
@@ -390,9 +401,12 @@ class OfflineCore:
             if wallet_passphrase and created_wallet:
                 self._lock_wallet()
 
-    def prepare_multisig_key(self, phrase, wallet_passphrase="", bip39_passphrase=""):
+    def prepare_multisig_key(self, phrase, wallet_passphrase="", bip39_passphrase="", *, derivation_path=DEFAULT_MULTISIG_PATH):
         """Create the local signer first so its public account key can be shared."""
         self._assert_isolation()
+        if not isinstance(derivation_path, str) or not derivation_path.strip() or len(derivation_path) > 4096:
+            raise ColdSetupError("Enter the local signer's derivation path, starting at m.")
+        derivation_path = derivation_path.strip()
         name = "cold-signer"
         root_xprv = ""
         created_wallet = False
@@ -404,11 +418,12 @@ class OfflineCore:
             if wallet_passphrase:
                 self.rpc.call("walletpassphrase", [wallet_passphrase, 90], wallet=name)
             root = self.rpc.call("addhdkey", [root_xprv], wallet=name)
-            account = self.rpc.call("derivehdkey", ["m/87h/0h/0h", {"hdkey": root["xpub"]}], wallet=name)
-            own_public = normalize_bip87_account_key(account["origin"] + account["xpub"])
+            account = self.rpc.call("derivehdkey", [derivation_path, {"hdkey": root["xpub"]}], wallet=name)
+            own_public = normalize_account_key(self.rpc, account["origin"] + account["xpub"])
             self.prepared_multisig = {
                 "root_xpub": root["xpub"], "own_account_key": own_public,
                 "encrypted": bool(wallet_passphrase),
+                "derivation_path": derivation_path,
             }
             return {"own_account_key": own_public, "encrypted": bool(wallet_passphrase)}
         except (CoreError, KeyError, TypeError) as exc:
@@ -430,7 +445,7 @@ class OfflineCore:
         if any(not isinstance(item, dict) or not isinstance(item.get("key"), str) or
                not isinstance(item.get("label"), str) or len(item["label"]) > 128 for item in other_signers):
             raise ColdSetupError("Each signer needs a public account key and a label of at most 128 characters.")
-        normalized = [normalize_bip87_account_key(item["key"]) for item in other_signers]
+        normalized = [normalize_account_key(self.rpc, item["key"]) for item in other_signers]
         external_xpubs = [key.split("]", 1)[1] for key in normalized]
         if len(set(external_xpubs)) != len(external_xpubs):
             raise ColdSetupError("A signer xpub was entered more than once.")
@@ -445,12 +460,12 @@ class OfflineCore:
                 self.rpc.call("walletpassphrase", [wallet_passphrase, 90], wallet=name)
             account = self.rpc.call(
                 "derivehdkey",
-                ["m/87h/0h/0h", {"private": True, "hdkey": self.prepared_multisig["root_xpub"]}],
+                [self.prepared_multisig["derivation_path"], {"private": True, "hdkey": self.prepared_multisig["root_xpub"]}],
                 wallet=name,
             )
             if not all(isinstance(account.get(key), str) for key in ("origin", "xpub", "xprv")):
-                raise ColdSetupError("Core did not return the expected BIP87 account key details.")
-            own_public = normalize_bip87_account_key(account["origin"] + account["xpub"])
+                raise ColdSetupError("Core did not return the expected signer account key details.")
+            own_public = normalize_account_key(self.rpc, account["origin"] + account["xpub"])
             if own_public != self.prepared_multisig["own_account_key"]:
                 raise ColdSetupError("The local signer key changed after preparation. Close this signer and retry.")
             signer_public = [own_public, *normalized]
@@ -518,10 +533,11 @@ class OfflineCore:
                 self._lock_wallet()
 
     def create_multisig_wallet(
-        self, phrase, threshold, other_signers, wallet_passphrase="", bip39_passphrase="", own_signer_label="This signer"
+        self, phrase, threshold, other_signers, wallet_passphrase="", bip39_passphrase="", own_signer_label="This signer",
+        *, derivation_path=DEFAULT_MULTISIG_PATH
     ):
         """Create a multisig wallet when all public signer keys are already known."""
-        self.prepare_multisig_key(phrase, wallet_passphrase, bip39_passphrase)
+        self.prepare_multisig_key(phrase, wallet_passphrase, bip39_passphrase, derivation_path=derivation_path)
         return self.complete_multisig_wallet(threshold, other_signers, wallet_passphrase, own_signer_label)
 
     def review_psbt(self, psbt):

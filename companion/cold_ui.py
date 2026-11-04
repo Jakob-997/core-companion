@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from .linux_cold import ColdSetupError
-from .offline_core import OfflineCore
+from .offline_core import DEFAULT_MULTISIG_PATH, OfflineCore
 from .rpc import CoreError
 from .wallet import validate_wallet_name
 from .seed import (
@@ -292,6 +292,14 @@ class ColdSignerDialog(QDialog):
         ):
             self.address_type.addItem(title, code)
         form.addRow("Address type", self.address_type)
+        self.multisig_path = QLineEdit(DEFAULT_MULTISIG_PATH)
+        self.multisig_path.setFont(fixed_font(10))
+        self.multisig_path.setToolTip(
+            "The path from this signer's master key to its account xpub. "
+            "BIP87 is the default; use the original path when recovering another wallet. Core validates it."
+        )
+        form.addRow("Signer derivation path", self.multisig_path)
+        form.setRowVisible(self.multisig_path, False)
         fields.addLayout(form, 1)
         details.addLayout(fields)
         layout.addStretch()
@@ -472,7 +480,7 @@ class ColdSignerDialog(QDialog):
 
     def _build_multisig_page(self):
         layout = self._card(scroll=True, surface=False)
-        _heading(layout, "MULTISIG POLICY", "Bring your signers together", "Share your public key, then add the other signers’ BIP87 keys.")
+        _heading(layout, "MULTISIG POLICY", "Bring your signers together", "Share your public key, then add each signer’s xpub and origin.")
         own_panel = _panel(layout, "Your signer")
         own_key_row = QHBoxLayout()
         own_key_row.setSpacing(24)
@@ -490,7 +498,7 @@ class ColdSignerDialog(QDialog):
         self.multisig_own_key.setAccessibleName("Your public signer key")
         self.multisig_own_key.setFixedHeight(130)
         self.multisig_own_key.setFont(fixed_font(10))
-        self.multisig_own_key.setToolTip("Share this public BIP87 key with the other signers. It contains no private key.")
+        self.multisig_own_key.setToolTip("Share this public account key and its origin with the other signers. It contains no private key.")
         own_key_fields.addWidget(self.multisig_own_key)
         own_key_fields.addStretch()
         own_key_row.addLayout(own_key_fields, 1)
@@ -877,7 +885,7 @@ class ColdSignerDialog(QDialog):
         self.single_choice.clicked.connect(lambda: self._choose_type("single"))
         self.multi_choice = ChoiceRow(
             "multisig", "Multisig", accent="blue", card=True,
-            tooltip="Several signers share a BIP87 wallet. Choose how many signatures are required and add each signer’s public key."
+            tooltip="Several signers share a wallet. Choose how many signatures are required and add each signer’s public key and origin."
         )
         self.multi_choice.clicked.connect(lambda: self._choose_type("multisig"))
         choices.addWidget(self.single_choice)
@@ -981,6 +989,7 @@ class ColdSignerDialog(QDialog):
             return
         self.wallet_mode = self.type_choice
         self.address_type.setVisible(self.type_choice == "single")
+        self.address_type_form.setRowVisible(self.multisig_path, self.type_choice == "multisig")
         address_label = self.address_type_form.labelForField(self.address_type)
         if address_label:
             address_label.setVisible(self.type_choice == "single")
@@ -1020,6 +1029,7 @@ class ColdSignerDialog(QDialog):
         fields = {
             self.wallet_name_input: "A name for this wallet in the interface and public backup. It does not change the keys.",
             self.address_type: "Choose the address format. Keep this choice with your recovery backup to recreate the same wallet.",
+            self.multisig_path: self.multisig_path.toolTip(),
             self.dice: "Optional dice rolls, coin flips or arbitrary text. Exact UTF-8 bytes, including spaces, are mixed with OS randomness and the wallet-file hash.",
             self.word_count: "12 words encode 128 bits; 24 encode 256 bits. The full SHA-256 is always shown in Audit details. BIP39 later derives a 512-bit seed.",
             self.entropy_audit: "Secret source values, the exact SHA-256 command, and the resulting entropy. These values can recreate your recovery phrase.",
@@ -1613,7 +1623,7 @@ class ColdSignerDialog(QDialog):
         name = QLineEdit(suggested_label)
         name.setPlaceholderText("Signer label")
         key = QLineEdit()
-        key.setPlaceholderText("[fingerprint/87h/0h/0h]xpub…")
+        key.setPlaceholderText("[fingerprint/path]xpub…")
         key.setFont(fixed_font(9))
         scan = QPushButton("Scan")
         scan.clicked.connect(lambda checked=False, field=key: self._start_qr_scanner(field))
@@ -1624,7 +1634,7 @@ class ColdSignerDialog(QDialog):
         self.signer_fields.append((name, key, scan))
         for widget, tip in (
             (name, "A short label to identify this signer in the wallet policy."),
-            (key, "The signer’s BIP87 account xpub, including its fingerprint and derivation origin."),
+            (key, "The signer’s xpub with its actual fingerprint and origin path. BIP48, BIP87 and custom paths are accepted."),
             (scan, "Scan this signer’s public account key QR."),
         ):
             widget.setToolTip(tip)
@@ -1680,7 +1690,7 @@ class ColdSignerDialog(QDialog):
             signer_label = name.text().strip()
             signer_key = key.text().strip()
             if not signer_label or not signer_key:
-                QMessageBox.warning(self, "Complete signer details", "Enter a label and BIP87 account xpub for every other signer.")
+                QMessageBox.warning(self, "Complete signer details", "Enter a label and xpub with origin information for every other signer.")
                 return
             if signer_label.casefold() in seen_labels:
                 QMessageBox.warning(self, "Signer labels", "Each signer needs a different label.")
@@ -1709,12 +1719,13 @@ class ColdSignerDialog(QDialog):
             return
         finally:
             self.multisig_password.clear()
-        self._show_complete(result, f"{self.threshold.value()} of {len(signers) + 1} multisig · BIP87")
+        self._show_complete(result, f"{self.threshold.value()} of {len(signers) + 1} multisig")
 
     def _prepare_multisig(self):
         try:
             result = self.core.prepare_multisig_key(
                 self.phrase, self.current_wallet_passphrase, self.current_bip39_passphrase,
+                derivation_path=self.multisig_path.text().strip(),
             )
         except (SeedError, ColdSetupError) as exc:
             self._reset_protection()
@@ -1777,7 +1788,7 @@ class ColdSignerDialog(QDialog):
         else:
             signer_text = "Single-signature · one signer"
         if own_key:
-            signer_text += "\n\nYour BIP87 account key\n" + own_key
+            signer_text += "\n\nYour public account key\n" + own_key
         self.signer_map.setPlainText(signer_text)
         self.wallet_type_summary = wallet_type
         self.signers_panel.setVisible(bool(result.get("signers")))
@@ -1804,6 +1815,7 @@ class ColdSignerDialog(QDialog):
         self.address_records = []
         self.hidden_addresses = []
         self.wallet_name_input.clear()
+        self.multisig_path.setText(DEFAULT_MULTISIG_PATH)
         self.setup_choice = self.type_choice = None
         for control in (self.create_choice, self.recover_choice, self.single_choice, self.multi_choice):
             control.setChecked(False)

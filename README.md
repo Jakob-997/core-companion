@@ -103,9 +103,11 @@ recreate the phrase; inspect them only on a trusted offline computer.
 
 BIP39 passphrases are hidden by default. Enable them in Settings only when needed; a passphrase changes the derived wallet. Wallet-file encryption is required for saved cold wallets and protects private keys in Core's backup. Labels and public descriptors remain readable. Python and Qt cannot guarantee erasure of secret memory.
 
-For multisig, prepare your signer and share its BIP87 account key before adding
-the other signers' keys and choosing a threshold. Core validates and imports
-the P2WSH policy. The wizard supports 2–20 signers. Export the completed public
+For multisig, choose the local signer derivation path (BIP87 is only the
+default), then share its public account key and origin. Other signers may use
+BIP48, BIP87 or custom origin paths; no shared derivation convention is required.
+Enter each xpub with its actual fingerprint and origin. Core validates the keys
+and descriptors before importing the P2WSH policy. The wizard supports 2–20 signers. Export the completed public
 wallet as a single checksummed receive/change multipath descriptor (/<0;1>/*), in QR or text form. It can be imported by Sparrow or the online node.
 
 **Completed cold wallets are saved, including address labels and indices.**
