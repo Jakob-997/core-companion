@@ -14,17 +14,17 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlsplit, parse_qs
 from pathlib import Path
-from PySide6.QtCore import Qt, QProcess, QTimer, QEvent, QSettings, QProcessEnvironment
+from PySide6.QtCore import Qt, QDate, QProcess, QTimer, QEvent, QSettings, QProcessEnvironment
 from PySide6.QtGui import QAction, QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
     QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip, QScrollArea,
     QStackedWidget, QSizePolicy)
-from PySide6.QtWidgets import QMessageBox, QCheckBox, QFileDialog
+from PySide6.QtWidgets import QMessageBox, QCheckBox, QFileDialog, QDateEdit
 from .qr import qr_pixmap
 from qrcode.exceptions import DataOverflowError
 from .scanner import QRScanner
@@ -102,6 +102,7 @@ class App(QMainWindow):
         self.service = None
         self.busy = False
         self.events = queue.Queue()
+        self.wallet_scan_progress_events = queue.Queue()
         self.skip = 0
         self.rows = []
         self.cold_session = None
@@ -529,7 +530,7 @@ class App(QMainWindow):
         sync_layout.setContentsMargins(18, 14, 18, 14)
         sync_layout.setSpacing(10)
         sync_row = QHBoxLayout()
-        self.sync_label = label("Blockchain sync · not connected", "ActionTitle")
+        self.sync_label = label("Blockchain sync · not started", "ActionTitle")
         sync_row.addWidget(self.sync_label)
         sync_row.addStretch()
         self.sync_detail = label("Local Bitcoin Core", "Muted")
@@ -541,6 +542,15 @@ class App(QMainWindow):
         self.sync_progress.setTextVisible(False)
         self.sync_progress.setFixedHeight(5)
         sync_layout.addWidget(self.sync_progress)
+        self.wallet_scan_label = label("", "Muted")
+        self.wallet_scan_label.hide()
+        sync_layout.addWidget(self.wallet_scan_label)
+        self.wallet_scan_progress = QProgressBar()
+        self.wallet_scan_progress.setRange(0, 100)
+        self.wallet_scan_progress.setTextVisible(False)
+        self.wallet_scan_progress.setFixedHeight(5)
+        self.wallet_scan_progress.hide()
+        sync_layout.addWidget(self.wallet_scan_progress)
         layout.addWidget(sync_card)
         self.wallet_empty = QFrame()
         self.wallet_empty.setObjectName("Surface")
@@ -1128,7 +1138,7 @@ class App(QMainWindow):
         if self.service is None:
             self.statusBar().showMessage("Connect to your online node first.")
             return
-        dialog, layout = self._dialog("Import your wallet", "Scan the public wallet exported by your cold signer.", size=(800, 560), online=True)
+        dialog, layout = self._dialog("Import your wallet", "Scan the public wallet exported by your cold signer.", size=(800, 650), online=True)
         panel = QFrame()
         panel.setObjectName("FormPanel")
         fields = QVBoxLayout(panel)
@@ -1147,6 +1157,30 @@ class App(QMainWindow):
         payload.setToolTip("Import a public descriptor, account xpub or zpub. Bare xpubs use native SegWit; use a descriptor for another address type or hardware signing origin. Never paste recovery words or private keys.")
         payload.installEventFilter(self)
         fields.addWidget(payload, 1)
+        fields.addWidget(label("Wallet history", "FieldLabel"))
+        history_mode = QComboBox()
+        history_mode.addItem("Scan all history (safest)", 0)
+        history_mode.addItem("Start from a known date", 1)
+        history_mode.setToolTip("A zpub does not contain the wallet's first-use date. Core must scan history to find earlier transactions.")
+        fields.addWidget(history_mode)
+        history_start_date = QDateEdit()
+        history_start_date.setCalendarPopup(True)
+        history_start_date.setDisplayFormat("d MMM yyyy")
+        history_start_date.setMinimumDate(QDate(2009, 1, 3))
+        history_start_date.setMaximumDate(QDate.currentDate())
+        history_start_date.setDate(QDate(2009, 1, 3))
+        history_start_date.setToolTip("Choose the earliest date this wallet could have received Bitcoin. Core starts scanning one day earlier.")
+        history_start_date.setVisible(False)
+        fields.addWidget(history_start_date)
+        history_mode.currentIndexChanged.connect(
+            lambda _index: history_start_date.setVisible(history_mode.currentData() == 1)
+        )
+        history_hint = label(
+            "If you are unsure, scan all history. A pruned node cannot scan blocks it has already discarded.",
+            "FormHint",
+        )
+        history_hint.setWordWrap(True)
+        fields.addWidget(history_hint)
         scanner = QRScanner(dialog)
         scan = button("Scan QR", scanner.scan)
         scan.setToolTip("Open the camera to scan the public wallet exported by your cold signer.")
@@ -1180,13 +1214,58 @@ class App(QMainWindow):
                 QMessageBox.warning(dialog, "Wallet data", "The wallet QR could not be read.")
                 return
             wallet_name = name.text().strip() or str(data.get("name", "")).strip()
+            if history_mode.currentData() == 0:
+                history_timestamp = 0
+            else:
+                selected_date = datetime.strptime(
+                    history_start_date.date().toString("yyyy-MM-dd"), "%Y-%m-%d"
+                ).replace(tzinfo=timezone.utc)
+                history_timestamp = max(0, int(selected_date.timestamp()) - 86400)
             service = self.service
+            progress_rpc = CoreRPC(self.port.text(), service.rpc.cookie_path)
             self.connection_purpose = "online"
             scanner.stop()
             dialog.accept()
-            self.task("Importing wallet and scanning blockchain history…",
-                      lambda: service.import_public_wallet(wallet_name, descriptors),
-                      lambda result: self.connected(service, result, wallet_name))
+            self._set_wallet_scan_progress(None)
+
+            def import_with_progress():
+                stopped = threading.Event()
+
+                def monitor_scan():
+                    scan_seen = False
+                    while not stopped.wait(1):
+                        try:
+                            info = progress_rpc.call("getwalletinfo", wallet=wallet_name, timeout=5)
+                        except CoreError:
+                            continue
+                        scanning = info.get("scanning")
+                        if isinstance(scanning, dict):
+                            scan_seen = True
+                            try:
+                                progress = float(scanning.get("progress", 0))
+                            except (TypeError, ValueError):
+                                continue
+                            if not stopped.is_set():
+                                self.wallet_scan_progress_events.put(max(0.0, min(1.0, progress)))
+                        elif scanning is False and scan_seen:
+                            if not stopped.is_set():
+                                self.wallet_scan_progress_events.put(1.0)
+                            return
+
+                monitor = threading.Thread(target=monitor_scan, daemon=True)
+                monitor.start()
+                try:
+                    return service.import_public_wallet(
+                        wallet_name, descriptors, timestamp=history_timestamp
+                    )
+                finally:
+                    stopped.set()
+
+            self.task(
+                "Importing wallet and scanning blockchain history…",
+                import_with_progress,
+                lambda result: self.connected(service, result, wallet_name),
+            )
 
         footer = QHBoxLayout()
         back = button("Back", dialog.reject)
@@ -1752,13 +1831,37 @@ class App(QMainWindow):
                 "The isolated signer process could not be started. Check the installation and try again.",
             )
 
+    def _set_wallet_scan_progress(self, progress):
+        if not hasattr(self, "wallet_scan_label"):
+            return
+        self.wallet_scan_label.show()
+        self.wallet_scan_progress.show()
+        if progress is None:
+            self.wallet_scan_label.setText("Wallet history scan · waiting for Core")
+            self.wallet_scan_progress.setRange(0, 0)
+            return
+        percent = max(0, min(100, round(float(progress) * 100)))
+        self.wallet_scan_label.setText(
+            f"Wallet history scan · {percent}% · balances may be incomplete"
+        )
+        self.wallet_scan_progress.setRange(0, 100)
+        self.wallet_scan_progress.setValue(percent)
+
     def _drain(self):
+        while True:
+            try:
+                progress = self.wallet_scan_progress_events.get_nowait()
+            except queue.Empty:
+                break
+            self._set_wallet_scan_progress(progress)
         try:
             done, result, error = self.events.get_nowait()
         except queue.Empty:
             return
         self.busy = False
         self.wallet_picker.setEnabled(True)
+        self.wallet_scan_label.hide()
+        self.wallet_scan_progress.hide()
         if self.local_probe_pending:
             self.local_probe_pending = False
             self.local_core_check_button.setEnabled(
@@ -1834,7 +1937,7 @@ class App(QMainWindow):
         for field in (self.balance, self.pending, self.immature):
             field.setText("—")
         self.online_name.setText("Connect to Bitcoin Core")
-        self.sync_label.setText("Blockchain sync · not connected")
+        self.sync_label.setText("Blockchain sync · not started")
         self.sync_detail.setText("Local Bitcoin Core")
         self.sync_progress.setValue(0)
         self._set_core_status("Bitcoin Core not connected", "error")
