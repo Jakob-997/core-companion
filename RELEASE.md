@@ -1,7 +1,9 @@
 # Release preparation
 
-The current version is **0.1.0rc1**, a Linux source release candidate.
-It has no independent security audit or signed release identity yet.
+The current version is **0.1.0rc1**, an unaudited Linux source release
+candidate. This older simple branch is published for comparison only, not as a
+funds-bearing release. It has no independent security audit or signed release
+identity yet.
 
 ## Build and reproduce
 
@@ -62,9 +64,9 @@ Installation follows [pip hash-checking guidance](https://pip.pypa.io/en/stable/
   network and swap disable/restore, hotplug isolation failure, closing/crash
   handling, QR camera access, and complete backup/recovery across two devices.
   Use disposable wallets and independently compare every address and signature.
-- Select the project's redistribution license and complete dependency notices
-  for the chosen distribution format. No license has been assigned to the
-  original Companion source by this preparation pass.
+- MIT covers the original Companion source; see [LICENSE](LICENSE). Vendored
+  files and dependencies retain their own terms. Complete and include dependency
+  notices before distributing a packaged release.
 - Establish the owner-controlled release-signing key and publish verified signed
   checksums. No public tag or GitHub release is created automatically.
 
