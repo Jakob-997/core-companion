@@ -294,9 +294,10 @@ notation, Core rejection propagation, malformed responses, duplicated xpubs
 under changed origins, duplicated local keys, mixed-policy receive/change
 construction, and private/public separation. They also exercised a now-removed
 editable local path. Those historical checks are not a verification of this
-change. No real keys or node were used. The previously failed Linux review VM
-remains unavailable, so a real-Core mixed-path creation/signing acceptance run
-remains required; this validation does not claim it was performed.
+change. No real keys or node were used. The Debian review VM was reachable for
+the 2026-11-03 startup diagnosis and was inspected read-only while its Online
+Node was running. No real-Core mixed-path creation/signing acceptance run was
+performed; that validation remains required.
 
 Origin information is supplied metadata, not cryptographic proof of another
 signer's seed/path. [BIP380](https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki)

@@ -143,9 +143,10 @@ cannot install/start Tor; their network policy also masks Tor system services.
    `python-mnemonic`. `to_seed()` applies the optional BIP39 passphrase;
    `to_hd_master_key()` produces the BIP32 root xprv. Bitcoin Core imports that
    root with `addhdkey` and owns all child-key and descriptor derivation.
-5. For multisig, Core derives the local signer account at
-   a user-selected path; `m/87h/0h/0h` is only the initial default. Cosigner
-   xpubs retain their actual origin paths, including BIP48 and custom paths.
+5. For multisig, Core derives the local signer account at the fixed
+   `m/87h/0h/0h` path. The UI does not ask the user to select a local path.
+   Cosigner xpubs retain their actual origin paths, including BIP48 and custom
+   paths; no shared derivation convention is required.
    A ranged public descriptor is passed to getdescriptorinfo for each key;
    Core validates and canonicalizes origins and extended keys. The UI shares
    the local public account key before asking for
@@ -247,8 +248,8 @@ descriptor syntax through Core. Keep the complete public wallet policy and
 independently compare receiving addresses across signers. Incoming fields accept
 account xpubs with origins, not already-ranged branch descriptors: the wizard
 adds /0/* and /1/* itself. Duplicate xpub rejection is independent of origin
-labels/paths. The selected local path is retained during preparation and reused
-for private derivation; it cannot silently fall back to the default at import.
+labels/paths. The local signer always uses `m/87h/0h/0h`; Core derives and retains
+that same path during preparation and private multisig completion.
 
 
 ## Welcome connection boundary
