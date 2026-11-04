@@ -595,9 +595,11 @@ class ColdSignerDialog(QDialog):
         for index in range(2):
             self._add_signer_fields(f"Signer {index + 2}")
         self.multisig_password = QLineEdit()
-        self.multisig_password.setPlaceholderText("Wallet password to finish setup")
+        self.multisig_password.setPlaceholderText("Wallet password to unlock this signer")
         self.multisig_password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.multisig_password.setToolTip("Unlock the encrypted wallet briefly to import the completed multisig policy.")
+        self.multisig_password.setToolTip(
+            "Unlock the encrypted signer briefly so Core can complete the shared multisig policy."
+        )
         self.multisig_password.hide()
         layout.addWidget(self.multisig_password)
         layout.addStretch()
@@ -606,8 +608,9 @@ class ColdSignerDialog(QDialog):
         back.clicked.connect(self._finish)
         footer.addWidget(back)
         footer.addStretch()
-        continue_button = QPushButton("Continue")
+        continue_button = QPushButton("Complete multisig wallet")
         continue_button.setObjectName("Primary")
+        continue_button.setToolTip("Import the shared signer policy into Core and verify the first receiving address.")
         continue_button.clicked.connect(self._create_multisig)
         footer.addWidget(continue_button)
         layout.addLayout(footer)
@@ -966,7 +969,12 @@ class ColdSignerDialog(QDialog):
 
     def _build_protection_page(self):
         layout = self._card(scroll=True, surface=False)
-        _heading(layout, "WALLET PROTECTION", "Protect your wallet")
+        _heading(
+            layout,
+            "WALLET PROTECTION",
+            "Final wallet settings",
+            "Choose wallet-file encryption, then create the wallet.",
+        )
         columns = QHBoxLayout()
         columns.setSpacing(20)
         content = _panel(columns, "Recovery protection", "A BIP39 passphrase creates a different wallet.")
@@ -1020,8 +1028,11 @@ class ColdSignerDialog(QDialog):
         back.clicked.connect(lambda: self.stack.setCurrentIndex(2 if self.phrase_source == "recover" else 4))
         footer.addWidget(back)
         footer.addStretch()
-        proceed = QPushButton("Continue")
+        proceed = QPushButton("Create wallet")
         proceed.setObjectName("Primary")
+        proceed.setToolTip(
+            "Apply the selected wallet-file encryption setting and create the Core wallet."
+        )
         proceed.clicked.connect(self._finish_wallet_protection)
         footer.addWidget(proceed)
         layout.addLayout(footer)
