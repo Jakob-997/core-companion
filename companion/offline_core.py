@@ -401,12 +401,9 @@ class OfflineCore:
             if wallet_passphrase and created_wallet:
                 self._lock_wallet()
 
-    def prepare_multisig_key(self, phrase, wallet_passphrase="", bip39_passphrase="", *, derivation_path=DEFAULT_MULTISIG_PATH):
+    def prepare_multisig_key(self, phrase, wallet_passphrase="", bip39_passphrase=""):
         """Create the local signer first so its public account key can be shared."""
         self._assert_isolation()
-        if not isinstance(derivation_path, str) or not derivation_path.strip() or len(derivation_path) > 4096:
-            raise ColdSetupError("Enter the local signer's derivation path, starting at m.")
-        derivation_path = derivation_path.strip()
         name = "cold-signer"
         root_xprv = ""
         created_wallet = False
@@ -418,12 +415,11 @@ class OfflineCore:
             if wallet_passphrase:
                 self.rpc.call("walletpassphrase", [wallet_passphrase, 90], wallet=name)
             root = self.rpc.call("addhdkey", [root_xprv], wallet=name)
-            account = self.rpc.call("derivehdkey", [derivation_path, {"hdkey": root["xpub"]}], wallet=name)
+            account = self.rpc.call("derivehdkey", [DEFAULT_MULTISIG_PATH, {"hdkey": root["xpub"]}], wallet=name)
             own_public = normalize_account_key(self.rpc, account["origin"] + account["xpub"])
             self.prepared_multisig = {
                 "root_xpub": root["xpub"], "own_account_key": own_public,
                 "encrypted": bool(wallet_passphrase),
-                "derivation_path": derivation_path,
             }
             return {"own_account_key": own_public, "encrypted": bool(wallet_passphrase)}
         except (CoreError, KeyError, TypeError) as exc:
@@ -460,7 +456,7 @@ class OfflineCore:
                 self.rpc.call("walletpassphrase", [wallet_passphrase, 90], wallet=name)
             account = self.rpc.call(
                 "derivehdkey",
-                [self.prepared_multisig["derivation_path"], {"private": True, "hdkey": self.prepared_multisig["root_xpub"]}],
+                [DEFAULT_MULTISIG_PATH, {"private": True, "hdkey": self.prepared_multisig["root_xpub"]}],
                 wallet=name,
             )
             if not all(isinstance(account.get(key), str) for key in ("origin", "xpub", "xprv")):
@@ -533,11 +529,10 @@ class OfflineCore:
                 self._lock_wallet()
 
     def create_multisig_wallet(
-        self, phrase, threshold, other_signers, wallet_passphrase="", bip39_passphrase="", own_signer_label="This signer",
-        *, derivation_path=DEFAULT_MULTISIG_PATH
+        self, phrase, threshold, other_signers, wallet_passphrase="", bip39_passphrase="", own_signer_label="This signer"
     ):
         """Create a multisig wallet when all public signer keys are already known."""
-        self.prepare_multisig_key(phrase, wallet_passphrase, bip39_passphrase, derivation_path=derivation_path)
+        self.prepare_multisig_key(phrase, wallet_passphrase, bip39_passphrase)
         return self.complete_multisig_wallet(threshold, other_signers, wallet_passphrase, own_signer_label)
 
     def review_psbt(self, psbt):

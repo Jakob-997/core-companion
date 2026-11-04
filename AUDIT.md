@@ -283,20 +283,20 @@ key expression. Malformed/private/non-ranged/unsolvable results are rejected.
 The wizard still applies its receive/change suffixes and checks the final
 private/public multisig descriptors through Core.
 
-The local derivation path is editable before signer preparation. BIP87 remains
-the initial default; BIP48, custom and root paths are delegated to derivehdkey.
-The selected path is retained and used again for private account derivation.
-The wallet summary no longer labels mixed/custom policies as BIP87. Duplicate
-xpub rejection, private imports and public-only exports remain in place.
+The local signer uses the fixed BIP87 path (`m/87h/0h/0h`); the UI does not ask
+users to choose its path. Other signers' supplied xpub origin paths remain
+flexible, including BIP48, BIP87, custom and root origins, and Core validates
+them. Duplicate xpub rejection, private imports and public-only exports remain
+in place.
 
-Fixture checks passed for BIP48/BIP87/custom/root origins, apostrophe notation,
-Core rejection propagation, malformed responses, duplicated xpubs under changed
-origins, duplicated local keys, mixed-policy receive/change construction, local
-path retention and private/public separation. Native Qt checks confirm the path
-field appears only for multisig, reaches preparation and fits 980x680 and
-1280x850. No real keys or node were used. The previously failed Linux review VM
-remains unavailable, so a new real-Core mixed-path creation/signing acceptance
-run remains required; this validation does not claim it was performed.
+Earlier fixture checks covered BIP48/BIP87/custom/root origins, apostrophe
+notation, Core rejection propagation, malformed responses, duplicated xpubs
+under changed origins, duplicated local keys, mixed-policy receive/change
+construction, and private/public separation. They also exercised a now-removed
+editable local path. Those historical checks are not a verification of this
+change. No real keys or node were used. The previously failed Linux review VM
+remains unavailable, so a real-Core mixed-path creation/signing acceptance run
+remains required; this validation does not claim it was performed.
 
 Origin information is supplied metadata, not cryptographic proof of another
 signer's seed/path. [BIP380](https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki)
