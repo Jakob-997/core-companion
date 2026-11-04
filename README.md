@@ -1,12 +1,16 @@
 # Core Companion
 
+**Older `simple` branch:** retained for comparison. Use `main` for the
+current outside review. This branch has not had an independent security review
+or Debian air-gap acceptance and is not ready for use with funds.
+
 A small Linux desktop wallet interface built around Bitcoin Core. Qt Widgets
 provides the screens; Core handles descriptors, key derivation, addresses,
 ownership checks, wallet data, and PSBT review and signing. Trezor's reference
 `python-mnemonic` provides BIP39 and the BIP32 master key.
 
-**0.1.0rc1 is a release candidate for review. Independent security review and
-Debian host-isolation acceptance are still required before a funds-bearing release.**
+**License:** MIT for the original Core Companion source. Vendored components
+and dependencies retain their own licenses and notices.
 
 ## Install on Debian
 
