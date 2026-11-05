@@ -1,7 +1,7 @@
 # Release preparation
 
 The current version is **0.1.0rc1**, an unaudited Linux source release
-candidate. This older simple branch is published for comparison only, not as a
+candidate published for outside review. Public source availability is not a
 funds-bearing release. It has no independent security audit or signed release
 identity yet.
 
@@ -37,9 +37,10 @@ python3 install.py
 ```
 
 Checksums detect differences; they do not authenticate the publisher. Before
-public distribution, the owner must sign the archive checksum using an existing
-release key whose fingerprint reviewers can verify independently. Do not
-generate an unannounced signing identity and treat it as established trust.
+distributing a packaged release, the owner must sign the archive checksum
+using an existing release key whose fingerprint reviewers can verify
+independently. Do not generate an unannounced signing identity and treat it as
+established trust.
 
 ## Dependency changes
 
@@ -61,7 +62,7 @@ Installation follows [pip hash-checking guidance](https://pip.pypa.io/en/stable/
 - Independent review of seed handling, public-policy recovery, transaction
   display/signing, OS isolation and release verification.
 - Debian desktop acceptance: clean install, actual administrator prompts,
-  network and swap disable/restore, hotplug isolation failure, closing/crash
+  permanent network disable, swap disable/restore, hotplug isolation failure, closing/crash
   handling, QR camera access, and complete backup/recovery across two devices.
   Use disposable wallets and independently compare every address and signature.
 - MIT covers the original Companion source; see [LICENSE](LICENSE). Vendored
@@ -73,3 +74,12 @@ Installation follows [pip hash-checking guidance](https://pip.pypa.io/en/stable/
 Windows and ARM64 need their own acceptance runs before being advertised as
 supported release targets. Existing validation evidence and its limits are in
 [AUDIT.md](AUDIT.md).
+
+Permanent offline release acceptance must cover first-time authorization, reboot with the guard before network managers, radio/NIC hot-plug, suspend/resume, failed setup, tamper refusal and offline updates. Perform these on a disposable Debian VM with no real keys. A committed installation must reject the development flag and all online paths. Never reconnect a real signer to perform release acceptance. See PERMANENT_AIRGAP.md.
+
+Tor acceptance must cover missing-tool installation, administrator rejection,
+repository verification failure, bootstrap failure, Tor loss during HTTPS and
+sync, stop/restart with a changed preference, refused external-node adoption,
+and the disable-Tor warning. Confirm no clearnet/DNS traffic from Core or curl
+in a packet-captured disposable Debian environment; other apps and the disclosed
+Tor installation bootstrap are outside the Tor-only application route.

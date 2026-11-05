@@ -1,0 +1,11 @@
+[Unit]
+Description=Maintain Core Companion permanent offline policy
+
+[Timer]
+OnBootSec=2s
+OnUnitInactiveSec=2s
+AccuracySec=250ms
+Unit=core-companion-airgap.service
+
+[Install]
+WantedBy=timers.target

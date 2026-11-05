@@ -3,6 +3,7 @@
 from decimal import Decimal
 import re
 from .rpc import CoreError
+from .public_wallet import expand_public_descriptors
 
 
 def btc(value):
@@ -19,21 +20,14 @@ class WalletService:
     def __init__(self, rpc):
         self.rpc = rpc
 
-    def import_public_wallet(self, name, descriptors):
+    def import_public_wallet(self, name, descriptors, timestamp=0):
         validate_wallet_name(name)
-        if not isinstance(descriptors, list) or not 1 <= len(descriptors) <= 2:
-            raise CoreError("Import one receive descriptor, or receive and change descriptors in that order.")
-        requests = []
-        for index, descriptor in enumerate(descriptors):
-            if not isinstance(descriptor, str) or len(descriptor) > 20000:
-                raise CoreError("Invalid public descriptor.")
-            checked = self.rpc.call("getdescriptorinfo", [descriptor])
-            if checked.get("hasprivatekeys") is not False or checked.get("isrange") is not True or checked.get("issolvable") is not True:
-                raise CoreError("Import requires ranged public descriptors without private keys.")
-            if any(item["desc"] == checked["descriptor"] for item in requests):
-                raise CoreError("Receive and change descriptors must be different.")
-            requests.append({"desc": checked["descriptor"], "timestamp": 0,
-                             "active": True, "internal": index == 1, "range": [0, 1000]})
+        if type(timestamp) is not int or timestamp < 0:
+            raise CoreError("Choose a valid wallet history start date.")
+        descriptors = expand_public_descriptors(self.rpc, descriptors)
+        requests = [{"desc": descriptor, "timestamp": timestamp, "active": True,
+                     "internal": index == 1, "range": [0, 1000]}
+                    for index, descriptor in enumerate(descriptors)]
         self.rpc.call("createwallet", {"wallet_name": name, "disable_private_keys": True, "blank": True})
         result = self.rpc.call("importdescriptors", [requests], wallet=name, timeout=3600)
         if not isinstance(result, list) or len(result) != len(requests) or any(not isinstance(item, dict) for item in result):
@@ -87,3 +81,37 @@ class WalletService:
             "decoded": self.rpc.call("decodepsbt", {"psbt": psbt}, wallet=name),
             "analysis": self.rpc.call("analyzepsbt", {"psbt": psbt}, wallet=name),
         }
+
+    def create_psbt(self, name, recipient, amount, fee_rate):
+        address = self.rpc.call("validateaddress", [recipient])
+        if address.get("isvalid") is not True:
+            raise CoreError("Enter a valid Bitcoin recipient address.")
+        try:
+            amount, fee_rate = Decimal(str(amount)), Decimal(str(fee_rate))
+            if (not amount.is_finite() or not fee_rate.is_finite() or
+                    not 0 < amount <= 21000000 or not 0 < fee_rate <= 10000 or
+                    amount * 100000000 != int(amount * 100000000)):
+                raise ValueError()
+        except (ValueError, ArithmeticError):
+            raise CoreError("Enter a positive BTC amount (up to 8 decimals) and fee rate in sat/vB.") from None
+        params = {
+            "inputs": [], "outputs": [{recipient: str(amount)}],
+            "options": {"includeWatching": True, "add_inputs": True, "fee_rate": str(fee_rate), "lockUnspents": False},
+            "bip32derivs": True,
+        }
+        # Export PSBTv0 for broad signer compatibility; Core 32 defaults to v2.
+        if self.rpc.call("getnetworkinfo").get("version", 0) >= 320000:
+            params["psbt_version"] = 0
+        funded = self.rpc.call("walletcreatefundedpsbt", params, wallet=name)
+        return dict(funded, decoded=self.rpc.call("decodepsbt", [funded["psbt"]]))
+
+    def finalize_psbt(self, name, psbt):
+        finalized = self.rpc.call("finalizepsbt", [psbt], wallet=name)
+        if finalized.get("complete") is not True or not finalized.get("hex"):
+            raise CoreError("The PSBT is not fully signed. Return it to the required signers.")
+        transaction = self.rpc.call("decoderawtransaction", [finalized["hex"]])
+        acceptance = self.rpc.call("testmempoolaccept", [[finalized["hex"]]])
+        return {"hex": finalized["hex"], "transaction": transaction, "acceptance": acceptance}
+
+    def broadcast(self, transaction_hex):
+        return self.rpc.call("sendrawtransaction", [transaction_hex])

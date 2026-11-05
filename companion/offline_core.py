@@ -16,23 +16,46 @@ from pathlib import Path
 from .linux_cold import ColdSetupError, NetworkSession, _active_swaps, _mount_type
 from .rpc import CoreError, CoreRPC
 from .seed import hash_wallet_dat, master_xprv
+from .storage import ColdWalletStore
+from .permanent_airgap import PermanentAirgap
+from .public_wallet import combined_public_descriptor, normalize_slip132_public_key
 
 
-_BIP87_ACCOUNT_KEY = re.compile(
-    r"^\[([0-9a-fA-F]{8})/(?:87h|87')/(?:0h|0')/(?:0h|0')\](xpub[1-9A-HJ-NP-Za-km-z]+)$"
-)
+DEFAULT_MULTISIG_PATH = "m/87h/0h/0h"
 
 
-def normalize_bip87_account_key(value):
-    """Accept only a mainnet xpub with an explicit BIP87 origin path."""
-    match = _BIP87_ACCOUNT_KEY.fullmatch("".join(str(value).split()))
-    if not match:
+def normalize_account_key(rpc, value):
+    """Normalize hardware-wallet keys; Core verifies the key and optional origin."""
+    if not isinstance(value, str) or len(value) > 4096:
+        raise ColdSetupError("Enter a public extended key with optional origin information.")
+    value = "".join(value.split())
+    match = re.fullmatch(
+        r"(\[[^\[\]]+\])?((?:xpub|ypub|zpub|Ypub|Zpub)[1-9A-HJ-NP-Za-km-z]{80,120})",
+        value,
+    )
+    if match is None:
         raise ColdSetupError(
-            "Each signer must provide an xpub with origin fingerprint and path "
-            "[fingerprint/87h/0h/0h]."
+            "Enter a mainnet extended public key, optionally prefixed with its origin, "
+            "for example [fingerprint/48h/0h/0h/2h]Zpub…"
         )
-    fingerprint, xpub = match.groups()
-    return f"[{fingerprint.lower()}/87h/0h/0h]{xpub}"
+    origin, key = match.groups()
+    try:
+        value = (origin or "") + normalize_slip132_public_key(key)
+    except CoreError as exc:
+        raise ColdSetupError(str(exc)) from None
+    prefix, suffix = "wpkh(", "/0/*)"
+    try:
+        checked = rpc.call("getdescriptorinfo", [prefix + value + suffix])
+    except CoreError as exc:
+        raise ColdSetupError(f"Core rejected the signer key or origin.\n\n{exc}") from None
+    if not isinstance(checked, dict) or not isinstance(checked.get("descriptor"), str):
+        raise ColdSetupError("Core returned an invalid signer-key description.")
+    descriptor = checked.get("descriptor", "").split("#", 1)[0]
+    if (checked.get("hasprivatekeys") is not False or checked.get("isrange") is not True
+            or checked.get("issolvable") is not True
+            or not descriptor.startswith(prefix) or not descriptor.endswith(suffix)):
+        raise ColdSetupError("Core could not validate a ranged public signer key.")
+    return descriptor[len(prefix):-len(suffix)]
 
 
 class ColdCoreRPC(CoreRPC):
@@ -42,7 +65,7 @@ class ColdCoreRPC(CoreRPC):
         "setnetworkactive", "stop", "createwallet", "unloadwallet", "addhdkey", "setlabel",
         "derivehdkey", "createwalletdescriptor", "getdescriptorinfo",
         "importdescriptors", "walletpassphrase", "walletlock",
-        "walletprocesspsbt", "listdescriptors",
+        "walletprocesspsbt", "listdescriptors", "backupwallet", "loadwallet",
     })
 
     def call(self, method, params=None, wallet=None, **kwargs):
@@ -69,10 +92,14 @@ class OfflineCore:
         self.port = None
         self.reviewed_transaction = None
         self.address_type = None
+        self.wallet_id = None
+        self.store = ColdWalletStore()
         self.prepared_multisig = None
 
     def _assert_isolation(self):
         """Recheck host isolation at every key-generation or signing boundary."""
+        if self.dev_keep_network and PermanentAirgap.is_committed():
+            raise ColdSetupError("The development network bypass is forbidden on a permanently offline installation.")
         if _active_swaps():
             raise ColdSetupError("System swap became active. Close the signer before continuing.")
         if not self.dev_keep_network:
@@ -205,6 +232,8 @@ class OfflineCore:
     def start(self):
         if sys.platform != "linux":
             raise ColdSetupError("The cold signer currently requires Linux.")
+        if self.dev_keep_network and PermanentAirgap.is_committed():
+            raise ColdSetupError("Development networking cannot be used on a permanently offline installation.")
         if not self.binary.is_file() or not os.access(self.binary, os.X_OK):
             raise ColdSetupError("Select an executable Bitcoin Core bitcoind binary.")
         if _mount_type(self.base) != "tmpfs":
@@ -395,8 +424,8 @@ class OfflineCore:
             if wallet_passphrase:
                 self.rpc.call("walletpassphrase", [wallet_passphrase, 90], wallet=name)
             root = self.rpc.call("addhdkey", [root_xprv], wallet=name)
-            account = self.rpc.call("derivehdkey", ["m/87h/0h/0h", {"hdkey": root["xpub"]}], wallet=name)
-            own_public = normalize_bip87_account_key(account["origin"] + account["xpub"])
+            account = self.rpc.call("derivehdkey", [DEFAULT_MULTISIG_PATH, {"hdkey": root["xpub"]}], wallet=name)
+            own_public = normalize_account_key(self.rpc, account["origin"] + account["xpub"])
             self.prepared_multisig = {
                 "root_xpub": root["xpub"], "own_account_key": own_public,
                 "encrypted": bool(wallet_passphrase),
@@ -421,7 +450,7 @@ class OfflineCore:
         if any(not isinstance(item, dict) or not isinstance(item.get("key"), str) or
                not isinstance(item.get("label"), str) or len(item["label"]) > 128 for item in other_signers):
             raise ColdSetupError("Each signer needs a public account key and a label of at most 128 characters.")
-        normalized = [normalize_bip87_account_key(item["key"]) for item in other_signers]
+        normalized = [normalize_account_key(self.rpc, item["key"]) for item in other_signers]
         external_xpubs = [key.split("]", 1)[1] for key in normalized]
         if len(set(external_xpubs)) != len(external_xpubs):
             raise ColdSetupError("A signer xpub was entered more than once.")
@@ -436,12 +465,12 @@ class OfflineCore:
                 self.rpc.call("walletpassphrase", [wallet_passphrase, 90], wallet=name)
             account = self.rpc.call(
                 "derivehdkey",
-                ["m/87h/0h/0h", {"private": True, "hdkey": self.prepared_multisig["root_xpub"]}],
+                [DEFAULT_MULTISIG_PATH, {"private": True, "hdkey": self.prepared_multisig["root_xpub"]}],
                 wallet=name,
             )
             if not all(isinstance(account.get(key), str) for key in ("origin", "xpub", "xprv")):
-                raise ColdSetupError("Core did not return the expected BIP87 account key details.")
-            own_public = normalize_bip87_account_key(account["origin"] + account["xpub"])
+                raise ColdSetupError("Core did not return the expected signer account key details.")
+            own_public = normalize_account_key(self.rpc, account["origin"] + account["xpub"])
             if own_public != self.prepared_multisig["own_account_key"]:
                 raise ColdSetupError("The local signer key changed after preparation. Close this signer and retry.")
             signer_public = [own_public, *normalized]
@@ -687,3 +716,60 @@ class OfflineCore:
             except OSError as exc:
                 raise ColdSetupError("Could not remove the temporary Core data from RAM.") from exc
         self.directory = None
+        self.store.release()
+
+    def save_wallet(self, metadata):
+        self._assert_isolation()
+        try:
+            self.wallet_id = self.store.save(self.rpc, self.wallet_id, metadata)
+        except (OSError, ValueError, CoreError) as exc:
+            raise ColdSetupError("Could not save the wallet. Keep this window open and check the storage location.") from exc
+        return self.wallet_id
+
+    def unload_signer(self):
+        if "cold-signer" in self.rpc.call("listwallets"):
+            self.rpc.call("unloadwallet", ["cold-signer"])
+        self.address_type = None
+        self.wallet_id = None
+        self.reviewed_transaction = None
+        self._prepare_signer()
+
+    def open_saved_wallet(self, wallet_id):
+        self._assert_isolation()
+        self._prepare_signer()
+        path = self.directory / "wallets" / "cold-signer" / "wallet.dat"
+        try:
+            metadata = self.store.restore(wallet_id, path)
+            self.rpc.call("loadwallet", ["cold-signer", False])
+            info = self.rpc.call("getwalletinfo", wallet="cold-signer")
+            encrypted = "unlocked_until" in info
+            recorded_encryption = metadata.get(
+                "encrypted", metadata.get("result", {}).get("encrypted", True)
+            )
+            if recorded_encryption is not encrypted:
+                raise ColdSetupError("The saved wallet encryption status does not match its Core backup.")
+            self.address_type = metadata["address_type"]
+            if self.address_type not in ("bech32", "bech32m", "p2sh-segwit", "legacy"):
+                raise ValueError()
+            descriptors = [item["desc"] for item in sorted(
+                (item for item in self.rpc.call("listdescriptors", [False], wallet="cold-signer")["descriptors"]
+                 if item.get("active") is True), key=lambda item: item.get("internal", False))]
+            self.wallet_id = wallet_id
+            result = metadata["result"]
+            result["descriptors"] = descriptors
+            result["address_info"] = self.rpc.call("getaddressinfo", [result["address"]], wallet="cold-signer")
+            if result["address_info"].get("ismine") is not True:
+                raise ColdSetupError("The saved identity address does not belong to this Core wallet.")
+            result["encrypted"] = encrypted
+            hidden = set(metadata.get("hidden_addresses", []))
+            records = {item["address"]: item for item in metadata.get("address_records", []) if item["address"] not in hidden}
+            for item in self.rpc.call("listreceivedbyaddress", {"minconf": 0, "include_empty": True}, wallet="cold-signer"):
+                if item["address"] not in hidden:
+                    records.setdefault(item["address"], {"address": item["address"], "label": item.get("label", ""), "used": False})
+            metadata["address_records"] = list(records.values())
+            return metadata
+        except (OSError, ValueError, KeyError, CoreError) as exc:
+            raise ColdSetupError("Core could not open the saved wallet.") from exc
+
+    def public_descriptor(self, descriptors):
+        return combined_public_descriptor(self.rpc, descriptors)

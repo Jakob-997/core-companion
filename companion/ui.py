@@ -1,5 +1,7 @@
 """Qt desktop views; Core access remains in wallet.py and rpc.py."""
 import argparse
+import base64
+import hashlib
 import json
 import os
 import queue
@@ -7,26 +9,33 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import urlsplit, parse_qs
 from pathlib import Path
-from PySide6.QtCore import Qt, QProcess, QTimer, QEvent
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtCore import Qt, QDate, QProcess, QTimer, QEvent, QSettings, QProcessEnvironment
+from PySide6.QtGui import QAction, QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QDialog,
-    QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip)
-from PySide6.QtWidgets import QMessageBox
+    QFormLayout, QPlainTextEdit, QFrame, QProgressBar, QToolTip, QScrollArea,
+    QStackedWidget, QSizePolicy)
+from PySide6.QtWidgets import QMessageBox, QCheckBox, QFileDialog, QDateEdit
 from .qr import qr_pixmap
+from qrcode.exceptions import DataOverflowError
 from .scanner import QRScanner
 from .rpc import CoreError, CoreRPC
 from .wallet import WalletService, btc
 from .linux_cold import ColdSetupError, ColdSystemSession, _system_tool
+from .permanent_airgap import PermanentAirgap
+from .network_privacy import core_tor_arguments, assert_core_tor
+from .tor import TorSession
 from .theme import stylesheet
-from .widgets import ActionRow, ChoiceRow, IconButton, LineIcon, fixed_font
+from .widgets import ActionRow, ChoiceRow, ComboBox, EmptyTable, IconButton, LineIcon, ScanIllustration, fixed_font
 from . import DEVELOPMENT_BUILD, __version__
 
 MANAGED_RPC_PORT = 8332
@@ -41,6 +50,7 @@ def label(text, name=None):
 
 def button(text, action, primary=False):
     widget = QPushButton(text)
+    widget.setAutoDefault(False)
     if primary:
         widget.setObjectName("Primary")
     widget.clicked.connect(action)
@@ -72,8 +82,8 @@ def page_layout(top=20, bottom=16, name="Page"):
     page = QWidget()
     page.setObjectName(name)
     layout = QVBoxLayout(page)
-    layout.setContentsMargins(30, top, 30, bottom)
-    layout.setSpacing(14)
+    layout.setContentsMargins(32, top, 32, bottom)
+    layout.setSpacing(16)
     return page, layout
 
 class App(QMainWindow):
@@ -92,15 +102,24 @@ class App(QMainWindow):
         self.service = None
         self.busy = False
         self.events = queue.Queue()
+        self.wallet_scan_progress_events = queue.Queue()
         self.skip = 0
         self.rows = []
         self.cold_session = None
         self.cold_process = None
         self.cold_process_group = None
         self.cold_session_id = None
+        self.cold_return_index = 1
+        self.cold_helper_failed = False
+        self.cold_helper_ready = False
+        self.cold_helper_failure = ""
+        self.cold_helper_error_shown = False
         self.cold_temp_path = None
         self.cold_restoring = False
         self.dev_keep_network = bool(dev_keep_network)
+        self.permanent_cold = PermanentAirgap.is_committed()
+        self.cold_required = self.permanent_cold or (not self.dev_keep_network and PermanentAirgap.saved_wallets_exist())
+        self.online_node_requested = False
         self.isolation_timer = QTimer(self)
         self.isolation_timer.setInterval(2000)
         self.isolation_timer.timeout.connect(self._check_cold_isolation)
@@ -109,10 +128,27 @@ class App(QMainWindow):
         self.downloaded_bitcoind = None
         self.core_download_closing = False
         self.core_download_cancelled = False
-        self.core_cookie_path = None
+        saved_core_directory = QSettings("CoreCompanion", "CoreCompanion").value(
+            "core/dataDirectory", "", type=str
+        )
+        self.core_data_directory = str(saved_core_directory or "").strip()
+        self.core_cookie_path = (
+            Path(self.core_data_directory) / ".cookie" if self.core_data_directory else None
+        )
         self.connection_fallback = False
+        self.local_probe_pending = False
         self.pending_cold_start = False
         self.managed_core_process = None
+        self.managed_node_tor_proxy = None
+        self.managed_rpc_port = MANAGED_RPC_PORT
+        self.tor_enabled = QSettings("CoreCompanion", "CoreCompanion").value("network/torOnly", True, type=bool)
+        self.tor_pending = None
+        self.tor_install_process = None
+        self.tor_install_output = ""
+        self.tor = TorSession(self)
+        self.tor.ready.connect(self._tor_ready)
+        self.tor.progress.connect(lambda value: self._set_core_status(f"Connecting to Tor · {value}%"))
+        self.tor.unavailable.connect(self._tor_unavailable)
         self.node_start_timer = QTimer(self)
         self.node_start_timer.setInterval(1200)
         self.node_start_timer.timeout.connect(self._poll_managed_node)
@@ -121,15 +157,22 @@ class App(QMainWindow):
         self.sync_timer.timeout.connect(self.refresh_sync_status)
         self._menus()
         self._layout()
-        self._connection_dialog()
+        self._connection_page()
+        self._privacy_page()
         self._install_help_targets()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._drain)
         self.timer.start(40)
         self.statusBar().showMessage("Bitcoin Core connection is local to this computer")
-        self._set_core_status("Looking for Bitcoin Core…")
+        self._set_core_status("Check an existing local Core or download the verified Core release.")
+        if self.cold_required:
+            self._lock_cold_installation()
+            self.mode_choice = "cold"
+            self._select_mode("cold")
+            self.tabs.setCurrentIndex(7)
     def _menus(self):
         menu = self.menuBar().addMenu("Wallet")
+        self.wallet_menu = menu
         for text, callback in [
             ("Welcome", lambda: self.tabs.setCurrentIndex(0)),
             ("Choose wallet mode", lambda: self.tabs.setCurrentIndex(1)),
@@ -142,19 +185,28 @@ class App(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(callback)
             menu.addAction(action)
+        self.menuBar().hide()
 
     def _layout(self):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(20, 10, 20, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(24, 12, 24, 8)
+        root.setSpacing(12)
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(12)
         mark = LineIcon("bitcoin", "Mark", stroke_width=1.9, inset=4)
-        mark.setFixedSize(34, 34)
+        mark.setFixedSize(38, 38)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.global_back = IconButton("back", "Back", self._go_back)
+        toolbar.addWidget(self.global_back)
         toolbar.addWidget(mark)
         toolbar.addWidget(label("Core Companion", "Brand"))
+        self.mode_indicator = label("ONLINE NODE", "HeaderMode")
+        self.mode_indicator.setProperty("mode", "online")
+        toolbar.addSpacing(12)
+        toolbar.addWidget(self.mode_indicator)
+        self.mode_indicator.hide()
         toolbar.addStretch()
         self.help_button = IconButton(
             "i", "Help", self._toggle_help_mode,
@@ -164,6 +216,16 @@ class App(QMainWindow):
         self.theme_button = IconButton("dark", "Dark mode", self._toggle_theme)
         toolbar.addWidget(self.theme_button)
         toolbar.addWidget(IconButton("node", "Connection", self.show_connection))
+        menu_button = QPushButton("&Wallet")
+        menu_button.setObjectName("ToolbarButton")
+        menu_button.setMenu(self.wallet_menu)
+        menu_button.setToolTip("Open wallet navigation, connection options, and application information.")
+        toolbar.addWidget(menu_button)
+        self.close_button = IconButton(
+            "close", "Close", self.close,
+            tooltip="Close Core Companion safely.",
+        )
+        toolbar.addWidget(self.close_button)
         root.addLayout(toolbar)
         divider = QFrame()
         divider.setObjectName("HeaderDivider")
@@ -182,6 +244,7 @@ class App(QMainWindow):
         self._addresses()
         self._tools()
         self._cold_network_page()
+        self._send()
         self.network = label("○  Offline", "Muted")
         self.statusBar().addPermanentWidget(self.network)
         self.cold_button_top = self.mode_continue
@@ -189,37 +252,84 @@ class App(QMainWindow):
             self.cold_choice.setEnabled(False)
             self.cold_choice.setToolTip("The cold signer is available on Linux in this first release.")
         self.tabs.setCurrentIndex(0)
+        self.tabs.currentChanged.connect(lambda index: self.mode_indicator.setVisible(
+            2 <= index <= 6 or index == 8
+            or index == getattr(self, "connection_page_index", -1)
+            or index == getattr(self, "privacy_page_index", -1)
+        ))
+        self.tabs.currentChanged.connect(lambda index: self.global_back.setVisible(index not in (0, 2)))
+        self.global_back.hide()
 
     def _welcome(self):
-        page, layout = page_layout(30, 24, "OnboardingPage")
-        layout.addWidget(label("Welcome", "Eyebrow"))
-        layout.addWidget(label("Bitcoin Core", "Title"))
-        intro = label(
-            "Companion checks for Bitcoin Core on this computer. Your node and wallet data stay local.",
-            "Muted",
-        )
+        page, layout = page_layout(20, 20, "OnboardingPage")
+        layout.addStretch(1)
+        content = QHBoxLayout()
+        content.setSpacing(24)
+        introduction_panel = QFrame()
+        introduction_panel.setObjectName("WelcomeIdentity")
+        introduction_panel.setMinimumHeight(420)
+        introduction = QVBoxLayout(introduction_panel)
+        introduction.setContentsMargins(32, 30, 32, 30)
+        introduction.setSpacing(18)
+        introduction.addWidget(label("CORE COMPANION", "WelcomeEyebrow"))
+        core_icon = LineIcon("node", "WelcomeArtwork", stroke_width=1.25, inset=8)
+        core_icon.setFixedSize(100, 100)
+        introduction.addWidget(core_icon)
+        title = label("Welcome to\nCore Companion", "WelcomeTitle")
+        title.setWordWrap(True)
+        introduction.addWidget(title)
+        intro = label("Cold storage.\nYour own watch-only node.", "WelcomeDetail")
         intro.setWordWrap(True)
-        layout.addWidget(intro)
+        introduction.addWidget(intro)
+        introduction.addStretch()
+        introduction.addWidget(label("BUILT AROUND BITCOIN CORE", "WelcomeBrand"))
+        content.addWidget(introduction_panel, 5)
         card = QFrame()
-        card.setObjectName("Card")
+        card.setObjectName("Surface")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(18, 16, 18, 16)
-        card_layout.setSpacing(10)
-        card_layout.addWidget(label("LOCAL NODE", "Eyebrow"))
-        self.core_status = label("Checking for Bitcoin Core…", "CoreStatus")
-        card_layout.addWidget(self.core_status)
-        card_layout.addWidget(label(
-            "Core connects to Bitcoin and keeps the node data on this computer.",
-            "Muted",
-        ))
-        row = QHBoxLayout()
-        row.addWidget(button("Connect to Bitcoin Core", self.connect, True))
-        self.download_button = button("Download & verify Bitcoin Core", self.download_bitcoin_core)
-        self.download_button.setToolTip(
-            "Downloads Core and its pinned signer keys, verifies the release, then installs it."
+        card_layout.setContentsMargins(32, 24, 32, 24)
+        card_layout.setSpacing(8)
+        card_layout.addWidget(label("01  /  LOCAL CONNECTION", "SectionLabel"))
+        card_layout.addWidget(label("Bitcoin Core", "Title"))
+        status_panel = QFrame()
+        status_panel.setObjectName("SubtlePanel")
+        status_layout = QVBoxLayout(status_panel)
+        status_layout.setContentsMargins(10, 10, 10, 10)
+        status_layout.setSpacing(8)
+        status_panel.setObjectName("CoreConnectionPanel")
+        self.core_status_panel = status_panel
+        self.core_status = label("Checking local connection…", "CoreStatus")
+        self.core_status.setWordWrap(True)
+        self.core_status.setMinimumHeight(32)
+        self.core_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        status_layout.addWidget(self.core_status)
+        self.core_status_hint = label(
+            "Checking this computer for an already-running Bitcoin Core node.",
+            "FormHint",
         )
-        row.addWidget(self.download_button)
-        card_layout.addLayout(row)
+        self.core_status_hint.setWordWrap(True)
+        status_layout.addWidget(self.core_status_hint)
+        card_layout.addWidget(status_panel)
+        self.local_core_check_button = button("Check local connection", self.check_local_core)
+        self.local_core_check_button.setObjectName("Quiet")
+        self.local_core_check_button.setToolTip(
+            "Checks an already-running Bitcoin Core node through local RPC. It does not start Core, Tor, or blockchain sync."
+        )
+        card_layout.addWidget(self.local_core_check_button)
+        self.core_folder_button = button("Select Core data folder…", self.select_core_data_directory)
+        self.core_folder_button.setObjectName("Quiet")
+        self.core_folder_button.setToolTip(
+            "Choose the folder where an already-running Bitcoin Core stores its .cookie file. This is used only for the local RPC connection."
+        )
+        card_layout.addWidget(self.core_folder_button)
+        choose_or = label("or", "FormHint")
+        choose_or.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(choose_or)
+        self.download_button = button("Download && verify Bitcoin Core", self.download_bitcoin_core)
+        self.download_button.setToolTip(
+            "Downloads Bitcoin Core and its pinned signer keys, verifies the release, then installs it."
+        )
+        card_layout.addWidget(self.download_button)
         download_status = QHBoxLayout()
         self.download_progress = QProgressBar()
         self.download_progress.setRange(0, 0)
@@ -231,53 +341,218 @@ class App(QMainWindow):
         self.cancel_download_button.hide()
         download_status.addWidget(self.cancel_download_button)
         card_layout.addLayout(download_status)
+        self.tor_choice = QCheckBox("Tor only (recommended)")
+        self.tor_choice.setChecked(self.tor_enabled)
+        self.tor_choice.setToolTip("Route Core downloads, signing-key downloads and blockchain sync through Tor, with no direct fallback.")
+        self.tor_choice.toggled.connect(self._privacy_toggled)
+        card_layout.addWidget(self.tor_choice)
+        privacy_note = label(
+            "When selected, Tor routes Core downloads and Online Node. Cold signing does not connect to Bitcoin peers; sync begins only in Online Node.",
+            "FormHint",
+        )
+        privacy_note.setWordWrap(True)
+        card_layout.addWidget(privacy_note)
         advanced = QHBoxLayout()
-        advanced.addWidget(button("Advanced connection settings…", self.show_connection))
+        advanced_button = button("Advanced connection settings…", self.show_connection)
+        advanced_button.setObjectName("Quiet")
+        advanced.addWidget(advanced_button)
         advanced.addStretch()
         card_layout.addLayout(advanced)
-        layout.addWidget(card)
-        layout.addStretch()
+        card_layout.addStretch()
+        content.addWidget(card, 6)
+        layout.addLayout(content)
+        layout.addStretch(1)
         continue_row = QHBoxLayout()
+        self.welcome_next_hint = label(
+            "Check a local connection or download and verify Bitcoin Core to continue.",
+            "FooterNote",
+        )
+        continue_row.addWidget(self.welcome_next_hint)
         continue_row.addStretch()
-        continue_row.addWidget(button("Choose wallet mode  →", lambda: self.tabs.setCurrentIndex(1), True))
+        self.welcome_continue_button = button("Continue  →", self._continue_welcome, True)
+        self.welcome_continue_button.setToolTip(
+            "Continue after a local Core connection succeeds or a Core release is verified."
+        )
+        self.welcome_continue_button.setEnabled(False)
+        continue_row.addWidget(self.welcome_continue_button)
         layout.addLayout(continue_row)
         self.tabs.addTab(page, "Welcome")
 
     def _set_core_status(self, text, state="idle"):
-        self.core_status.setText(text)
-        self.core_status.setProperty("state", state)
-        self.core_status.style().unpolish(self.core_status)
-        self.core_status.style().polish(self.core_status)
-        self.core_status.update()
+        fields = [self.core_status]
+        if hasattr(self, "connection_status"):
+            fields.append(self.connection_status)
+        for field in fields:
+            field.setText(text)
+            field.setProperty("state", state)
+            field.style().unpolish(field)
+            field.style().polish(field)
+            field.updateGeometry()
+            field.update()
+        if hasattr(self, "core_status_panel"):
+            self.core_status_panel.setProperty("state", state)
+            self.core_status_panel.style().unpolish(self.core_status_panel)
+            self.core_status_panel.style().polish(self.core_status_panel)
+            self.core_status_panel.update()
+        self._update_welcome_actions()
+
+    def _update_welcome_actions(self):
+        if not hasattr(self, "welcome_continue_button"):
+            return
+        verified = bool(self._installed_core_binary())
+        connected = self.core_status.property("state") == "connected"
+        pending = self.local_probe_pending or self.busy
+        ready = verified or connected
+        self.welcome_continue_button.setEnabled(ready and not pending)
+        can_check = not self.cold_required and self.mode_choice != "cold" and not pending
+        self.local_core_check_button.setEnabled(can_check)
+        self.core_folder_button.setEnabled(can_check)
+        if pending:
+            text = "Checking local Bitcoin Core…"
+        elif connected and verified:
+            text = "Connected · Bitcoin Core is also verified."
+        elif connected:
+            text = "Connected to Bitcoin Core · ready to continue."
+        elif verified:
+            text = "Bitcoin Core is verified · ready to continue."
+        else:
+            text = "Check a local connection or download and verify Bitcoin Core to continue."
+        self.welcome_next_hint.setText(text)
+
+    def _continue_welcome(self):
+        if self.local_probe_pending or self.busy:
+            self.statusBar().showMessage("Wait for the local connection check to finish.")
+            return
+        if not self.welcome_continue_button.isEnabled():
+            self.statusBar().showMessage(
+                "Connect to a local Core or download and verify Bitcoin Core first."
+            )
+            return
+        self.tabs.setCurrentIndex(1)
+
+    def _core_cookie(self):
+        return self.core_cookie_path or default_cookie_path()
+
+    def select_core_data_directory(self):
+        if not self._allow_online():
+            return
+        initial = self.core_data_directory or str(default_cookie_path().parent)
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Bitcoin Core data folder",
+            initial,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not directory:
+            return
+        self.core_data_directory = directory
+        self.core_cookie_path = Path(directory) / ".cookie"
+        QSettings("CoreCompanion", "CoreCompanion").setValue(
+            "core/dataDirectory", directory
+        )
+        if self.core_cookie_path.is_file():
+            self.statusBar().showMessage("Core data folder selected. Checking local connection.")
+            self.check_local_core()
+        else:
+            self._set_core_status("No running Core found in this folder", "error")
+            self.core_status_hint.setText(
+                "The selected folder has no active .cookie file. Start Core with this data folder, or download and verify Core below."
+            )
+            self.statusBar().showMessage("No active Core cookie found in the selected folder.")
+
+    def check_local_core(self):
+        """Probe only an existing local Core RPC endpoint; never launch Core."""
+        if not self._allow_online():
+            return
+        if self.mode_choice == "cold" or self.cold_session:
+            self.statusBar().showMessage("Local connection checks are off in Cold Storage.")
+            return
+        if self.busy or self.local_probe_pending:
+            return
+        cookie = self._core_cookie()
+        if not cookie.is_file():
+            if self.core_data_directory:
+                self._set_core_status("No running Core found in this folder", "error")
+                self.core_status_hint.setText(
+                    "No active .cookie file was found in the selected folder. Start Core there, select another folder, or download and verify Core."
+                )
+            else:
+                self.refresh_core_availability()
+            self.statusBar().showMessage(
+                "No running local Core found. Select its data folder or download and verify Bitcoin Core."
+            )
+            return
+        self.local_probe_pending = True
+        self._set_core_status("Checking local connection…", "checking")
+        self.core_status_hint.setText(
+            "Testing the existing local RPC connection. Core will not be started and blockchain sync will not begin."
+        )
+        self._update_welcome_actions()
+        port = self.port.text()
+        self.task(
+            "Checking the existing local Bitcoin Core connection…",
+            lambda: CoreRPC(port, cookie).call("getnetworkinfo"),
+            self._local_core_check_complete,
+            show_message=False,
+        )
+
+    def _local_core_check_complete(self, node):
+        version = str(node.get("subversion", "Bitcoin Core"))[:120]
+        active = node.get("networkactive")
+        peers = node.get("connections")
+        peer_count = peers if type(peers) is int and peers >= 0 else None
+        details = [version, "local RPC responded"]
+        if active is False:
+            details.append("peer networking is off")
+        elif active is True:
+            count = f"{peer_count} peer connection(s)" if peer_count is not None else "peer networking enabled"
+            details.append(count)
+        self._set_core_status("✓ Connected to Bitcoin Core", "connected")
+        self.core_status_hint.setText(" · ".join(details))
+        self.statusBar().showMessage(
+            "Local Core connection confirmed. Companion did not start Core, Tor, or blockchain sync."
+        )
+
+    def refresh_core_availability(self):
+        """Report local files only; this check makes no network connection."""
+        if self._core_cookie().is_file():
+            self._set_core_status("Checking local connection…", "checking")
+            self.core_status_hint.setText(
+                "An existing Core cookie was found. Checking its local RPC connection."
+            )
+        elif self._installed_core_binary():
+            self._set_core_status("Bitcoin Core is verified", "verified")
+            self.core_status_hint.setText(
+                "Ready to start when you choose Online Node. Blockchain sync does not start here."
+            )
+        else:
+            self._set_core_status("No local Core connection found", "error")
+            self.core_status_hint.setText(
+                "Select the data folder for a running Core node, or download and verify Bitcoin Core below."
+            )
 
     def _mode_page(self):
-        page, layout = page_layout(28, 24, "OnboardingPage")
-        layout.addWidget(label("Choose a wallet mode", "Title"))
-        choices = QVBoxLayout()
-        choices.setSpacing(0)
-        self.cold_choice = ChoiceRow("❄", "Cold storage (private keys)", accent="blue")
+        page, layout = page_layout(36, 24, "OnboardingPage")
+        layout.addWidget(label("02  /  WALLET MODE", "SectionLabel"))
+        layout.addWidget(label("Choose a wallet mode", "HeroTitle"))
+        layout.addSpacing(12)
+        choices = QHBoxLayout()
+        choices.setSpacing(20)
+        self.cold_choice = ChoiceRow(
+            "cold", "Cold storage", "Private keys", accent="blue", card=True,
+            tooltip="Create or recover an offline signing wallet. This mode holds private keys and signs transactions without connecting Core to peers.",
+        )
         self.cold_choice.clicked.connect(lambda: self._select_mode("cold"))
-        self.online_choice = ChoiceRow("◉", "Online node (watch only)", accent="red")
+        self.online_choice = ChoiceRow(
+            "node", "Online node", "Watch only", accent="red", card=True,
+            tooltip="Run a Bitcoin Core node and download the blockchain. Import your public wallet to view balances, activity and receiving addresses without private keys.",
+        )
         self.online_choice.clicked.connect(lambda: self._select_mode("online"))
-        choices.addWidget(self.cold_choice)
-        divider = QHBoxLayout()
-        divider.setContentsMargins(0, 5, 0, 5)
-        divider.addStretch(1)
-        left_rule = QFrame()
-        left_rule.setFrameShape(QFrame.Shape.HLine)
-        left_rule.setObjectName("ChoiceDivider")
-        right_rule = QFrame()
-        right_rule.setFrameShape(QFrame.Shape.HLine)
-        right_rule.setObjectName("ChoiceDivider")
-        divider.addWidget(left_rule, 1)
-        divider.addWidget(label("OR", "Muted"))
-        divider.addWidget(right_rule, 1)
-        choices.addLayout(divider)
-        choices.addWidget(self.online_choice)
+        choices.addWidget(self.cold_choice, 1)
+        choices.addWidget(self.online_choice, 1)
         layout.addLayout(choices)
         layout.addStretch()
         row = QHBoxLayout()
-        row.addWidget(button("‹  Back", lambda: self.tabs.setCurrentIndex(0)))
         row.addStretch()
         self.mode_continue = button("Continue  →", self._continue_mode, True)
         self.mode_continue.setEnabled(False)
@@ -289,7 +564,7 @@ class App(QMainWindow):
         page, layout = page_layout(30, 24, "OnboardingPage")
         layout.addWidget(label("Cold storage", "Eyebrow"))
         layout.addWidget(label(
-            "Cold signer test mode" if self.dev_keep_network else "Keep this computer offline",
+            "Cold signer test mode" if self.dev_keep_network else "Permanently offline computer",
             "Title",
         ))
         notice = QFrame()
@@ -303,21 +578,44 @@ class App(QMainWindow):
         notice_copy = QVBoxLayout()
         notice_copy.setSpacing(5)
         notice_copy.addWidget(label(
-            "Computer networking stays on" if self.dev_keep_network else "Network access will be disabled",
+            "Computer networking stays on" if self.dev_keep_network else "Never take this computer back online",
             "NoticeTitle",
         ))
         if self.dev_keep_network:
             detail = "Bitcoin Core peer networking remains off. Swap is still disabled. Use test wallets only."
         else:
-            detail = "Swap will also be disabled. Close other programs first; on a low-memory computer, the desktop may freeze."
-        notice_copy.addWidget(label(detail, "Muted"))
+            detail = ("This permanently changes system networking. Once used for a real wallet, never take this computer back online. "
+                      "Closing Core Companion or restarting Linux will not re-enable networking. "
+                      "For the strongest safeguard, physically remove Wi-Fi, Ethernet, Bluetooth and other networking hardware.")
+        warning = label(detail, "Muted")
+        warning.setWordWrap(True)
+        notice_copy.addWidget(warning)
+        core_note = label(
+            "Cold storage does not download or sync the blockchain. Its signer Core process is temporary and peer-disabled.",
+            "FormHint",
+        )
+        core_note.setWordWrap(True)
+        notice_copy.addWidget(core_note)
         notice_layout.addLayout(notice_copy, 1)
         layout.addWidget(notice)
+        self.permanent_acknowledgement = QCheckBox(
+            "I understand: a real-wallet computer must never go back online."
+            if not self.dev_keep_network else "Testing only: never put real wallet keys on this VM.")
+        self.permanent_acknowledgement.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
+        layout.addWidget(self.permanent_acknowledgement)
+        memory_note = label(
+            "Swap is turned off while signing and restored when closed. Linux may ask for permission to turn it off or restore it. Close other programs first; a low-memory VM can freeze.",
+            "Muted",
+        )
+        memory_note.setWordWrap(True)
+        layout.addWidget(memory_note)
         layout.addStretch(1)
         footer = QHBoxLayout()
-        footer.addWidget(button("‹  Back", self._back_from_cold_notice))
         footer.addStretch()
-        continue_button = button("Continue", self._begin_cold_signer, True)
+        continue_button = button("Continue (testing)" if self.dev_keep_network else "Commit to permanent offline mode",
+                                 self._begin_cold_signer, True)
+        continue_button.setEnabled(False)
+        self.permanent_acknowledgement.toggled.connect(continue_button.setEnabled)
         continue_button.setObjectName("ColdContinue")
         footer.addWidget(continue_button)
         layout.addLayout(footer)
@@ -328,27 +626,28 @@ class App(QMainWindow):
 
     def _online_home(self):
         page, layout = page_layout(18, 16, "OnlinePage")
-        layout.setSpacing(10)
+        layout.setSpacing(12)
         title_row = QHBoxLayout()
-        title_row.addWidget(label("Watch-only wallet", "Eyebrow"))
+        title_copy = QVBoxLayout()
+        title_copy.setSpacing(6)
+        self.online_name = label("Your online node", "Title")
+        self.online_name.setWordWrap(True)
+        title_copy.addWidget(self.online_name)
+        title_row.addLayout(title_copy, 1)
         title_row.addStretch()
-        self.wallet_picker = QComboBox()
+        self.wallet_picker = ComboBox()
         self.wallet_picker.setMinimumWidth(210)
         self.wallet_picker.currentTextChanged.connect(self.select_wallet)
         title_row.addWidget(self.wallet_picker)
-        self.online_name = label("Connect to Bitcoin Core", "Title")
+        title_row.addWidget(button("Import wallet", self._import_wallet_dialog))
         layout.addLayout(title_row)
-        wallet_row = QHBoxLayout()
-        wallet_row.addWidget(self.online_name, 1)
-        wallet_row.addWidget(button("Import wallet", self._import_wallet_dialog))
-        layout.addLayout(wallet_row)
         sync_card = QFrame()
-        sync_card.setObjectName("Card")
+        sync_card.setObjectName("SubtlePanel")
         sync_layout = QVBoxLayout(sync_card)
-        sync_layout.setContentsMargins(15, 11, 15, 11)
-        sync_layout.setSpacing(6)
+        sync_layout.setContentsMargins(18, 14, 18, 14)
+        sync_layout.setSpacing(10)
         sync_row = QHBoxLayout()
-        self.sync_label = label("Blockchain sync · not connected", "ActionTitle")
+        self.sync_label = label("Blockchain sync · not started", "ActionTitle")
         sync_row.addWidget(self.sync_label)
         sync_row.addStretch()
         self.sync_detail = label("Local Bitcoin Core", "Muted")
@@ -358,75 +657,135 @@ class App(QMainWindow):
         self.sync_progress.setRange(0, 1000)
         self.sync_progress.setValue(0)
         self.sync_progress.setTextVisible(False)
-        self.sync_progress.setFixedHeight(8)
+        self.sync_progress.setFixedHeight(5)
         sync_layout.addWidget(self.sync_progress)
+        self.wallet_scan_label = label("", "Muted")
+        self.wallet_scan_label.hide()
+        sync_layout.addWidget(self.wallet_scan_label)
+        self.wallet_scan_progress = QProgressBar()
+        self.wallet_scan_progress.setRange(0, 100)
+        self.wallet_scan_progress.setTextVisible(False)
+        self.wallet_scan_progress.setFixedHeight(5)
+        self.wallet_scan_progress.hide()
+        sync_layout.addWidget(self.wallet_scan_progress)
         layout.addWidget(sync_card)
+        self.wallet_empty = QFrame()
+        self.wallet_empty.setObjectName("Surface")
+        self.wallet_empty.setMinimumHeight(280)
+        empty = QHBoxLayout(self.wallet_empty)
+        empty.setContentsMargins(32, 30, 32, 30)
+        empty.setSpacing(32)
+        empty.addStretch(1)
+        empty_art = ScanIllustration()
+        empty_art.setFixedSize(172, 172)
+        empty.addWidget(empty_art)
+        empty_copy = QVBoxLayout()
+        empty_copy.setSpacing(14)
+        empty_copy.addStretch()
+        empty_copy.addWidget(label("YOUR PUBLIC WALLET", "SectionLabel"))
+        empty_copy.addWidget(label("Import your wallet", "Title"))
+        empty_detail = label("Scan the public wallet from your cold signer.", "PageDescription")
+        empty_detail.setWordWrap(True)
+        empty_copy.addWidget(empty_detail)
+        empty_copy.addWidget(button("Import wallet", self._import_wallet_dialog, True), 0, Qt.AlignmentFlag.AlignLeft)
+        empty_note = label("Public keys only. Your private keys stay on the signer.", "FooterNote")
+        empty_note.setWordWrap(True)
+        empty_copy.addWidget(empty_note)
+        empty_copy.addStretch()
+        empty.addLayout(empty_copy, 3)
+        empty.addStretch(1)
+        layout.addWidget(self.wallet_empty, 1)
         self.wallet_content = QWidget()
         wallet_layout = QVBoxLayout(self.wallet_content)
         wallet_layout.setContentsMargins(0, 0, 0, 0)
-        wallet_layout.setSpacing(10)
+        wallet_layout.setSpacing(14)
         layout.addWidget(self.wallet_content, 1)
-        layout.addStretch()
         layout = wallet_layout
         self.wallet_content.hide()
         self.wallet_picker.hide()
-        kpis = QHBoxLayout()
-        self.balance = self._kpi(kpis, "Balance", "— BTC")
-        self.pending = self._kpi(kpis, "Unconfirmed", "— BTC")
-        self.immature = self._kpi(kpis, "Immature", "— BTC")
-        layout.addLayout(kpis)
+        balances = QFrame()
+        balances.setObjectName("BalanceHero")
+        balances.setMinimumHeight(120)
+        kpis = QHBoxLayout(balances)
+        kpis.setContentsMargins(10, 6, 10, 6)
+        kpis.setSpacing(18)
+        self.balance = self._kpi(kpis, "AVAILABLE BALANCE · BTC", "—", main=True)
+        self.pending = self._kpi(kpis, "UNCONFIRMED · BTC", "—")
+        self.immature = self._kpi(kpis, "MINED REWARDS · LOCKED", "—")
+        self.immature.setToolTip("Newly mined block rewards cannot be spent until they mature after 100 blocks.")
+        self.immature.parentWidget().hide()
+        layout.addWidget(balances)
         actions = QGridLayout()
-        actions.setHorizontalSpacing(9)
-        actions.setVerticalSpacing(9)
+        actions.setHorizontalSpacing(14)
+        actions.setVerticalSpacing(12)
         receive_action = ActionRow(
-            "↓", "Receive Bitcoin", "", primary=True,
+            "↓", "Receive", "", primary=True,
             tooltip="Create an address and QR code using Bitcoin Core.",
         )
         receive_action.clicked.connect(self._open_receive)
         send_action = ActionRow(
-            "⇧", "Wallet activity", "",
-            tooltip="Review wallet transactions and confirmations.", icon_key="activity",
+            "⇧", "Send", "",
+            tooltip="Create an unsigned PSBT for your cold signer.", icon_key="send",
         )
-        send_action.clicked.connect(lambda: self.tabs.setCurrentIndex(3))
+        send_action.clicked.connect(lambda: self.tabs.setCurrentIndex(8))
         addresses_action = ActionRow(
-            "▣", "View addresses & labels", "",
+            "▣", "Addresses", "",
             tooltip="Browse addresses known to the selected Core wallet.",
         )
         addresses_action.clicked.connect(lambda: self.tabs.setCurrentIndex(5))
         tools_action = ActionRow(
-            "⚙", "Tools & Settings", "",
-            tooltip="Inspect a PSBT or start a separate cold signer session.",
+            "⚙", "Tools", "",
+            tooltip="Import a signed PSBT, scan its QR, or change appearance.",
         )
         tools_action.clicked.connect(lambda: self.tabs.setCurrentIndex(6))
         for index, action in enumerate((receive_action, send_action, addresses_action, tools_action)):
-            actions.addWidget(action, index // 2, index % 2)
+            action.setMinimumHeight(82)
+            actions.addWidget(action, 0, index)
         layout.addLayout(actions)
+        activity_card = QFrame()
+        activity_card.setObjectName("Surface")
+        activity = QVBoxLayout(activity_card)
+        activity.setContentsMargins(18, 16, 18, 18)
+        activity.setSpacing(12)
         activity_header = QHBoxLayout()
         activity_header.addWidget(label("Recent activity", "Heading"))
         activity_header.addStretch()
-        activity_header.addWidget(button("All  →", lambda: self.tabs.setCurrentIndex(3)))
-        layout.addLayout(activity_header)
+        all_activity = button("All  →", lambda: self.tabs.setCurrentIndex(3))
+        all_activity.setObjectName("Quiet")
+        activity_header.addWidget(all_activity)
+        activity.addLayout(activity_header)
         self.recent = self.table(["DATE", "LABEL", "AMOUNT · BTC"])
+        self.recent.setObjectName("EmbeddedTable")
         self.recent.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.recent.setMaximumHeight(150)
-        layout.addWidget(self.recent)
-        layout.addWidget(label("Core owns the wallet data. Companion displays what Core reports.", "Muted"))
-        self.tabs.addTab(page, "Wallet")
+        self.recent.setMinimumHeight(150)
+        self.recent.cellActivated.connect(self.transaction_details)
+        activity.addWidget(self.recent, 1)
+        layout.addWidget(activity_card, 1)
+        viewport = QScrollArea()
+        viewport.setWidgetResizable(True)
+        viewport.setFrameShape(QFrame.Shape.NoFrame)
+        viewport.setWidget(page)
+        self.tabs.addTab(viewport, "Wallet")
 
-    def _kpi(self, parent_layout, heading, value):
+    def _kpi(self, parent_layout, heading, value, *, main=False):
         card = QFrame()
-        card.setObjectName("KPI")
+        card.setObjectName("PageContent")
         column = QVBoxLayout(card)
-        column.setContentsMargins(14, 10, 14, 10)
-        column.setSpacing(5)
-        column.addWidget(label(heading, "Muted"))
-        result = label(value, "KPIValue")
+        column.setContentsMargins(18, 18, 18, 18)
+        column.setSpacing(10)
+        column.addWidget(label(heading, "SectionLabel"))
+        result = label(value, "DashboardAmount" if main else "KPIValue")
         column.addWidget(result)
-        parent_layout.addWidget(card, 1)
+        parent_layout.addWidget(card, 2 if main else 1)
         return result
 
     def _select_mode(self, mode):
+        if mode == "online" and not self._allow_online():
+            return
         self.mode_choice = mode
+        self.local_core_check_button.setEnabled(
+            mode != "cold" and not self.cold_required and not self.local_probe_pending
+        )
         self.cold_choice.setChecked(mode == "cold")
         self.online_choice.setChecked(mode == "online")
         self.mode_continue.setObjectName("ColdContinue" if mode == "cold" else "OnlineContinue")
@@ -435,15 +794,21 @@ class App(QMainWindow):
         self.mode_continue.setEnabled(True)
 
     def _continue_mode(self):
+        if self.busy:
+            self.statusBar().showMessage("Wait for the local Core check to finish before continuing.")
+            return
+        if self.mode_choice == "online" and not self._allow_online():
+            return
         if self.mode_choice == "cold":
             self.start_cold_signer()
         elif self.mode_choice == "online":
+            self.online_node_requested = True
             if self.service:
                 self.sync_timer.start()
                 self.tabs.setCurrentIndex(2)
             else:
                 self.connection_purpose = "online"
-                cookie = default_cookie_path()
+                cookie = self._core_cookie()
                 if cookie.is_file():
                     self._use_core_connection(cookie, 8332)
                     self.connect()
@@ -452,16 +817,33 @@ class App(QMainWindow):
 
     def _toggle_help_mode(self):
         self.help_mode = not self.help_mode
-        self.help_button.set_caption("Help on" if self.help_mode else "Help")
-        self.help_button.setProperty("active", self.help_mode)
-        self.help_button.style().unpolish(self.help_button)
-        self.help_button.style().polish(self.help_button)
+        controls = [self.help_button] + [control for control in self.findChildren(IconButton)
+                                       if control.property("helpToggle")]
+        for control in controls:
+            control.set_caption("Help on" if self.help_mode else "Help")
+            control.setProperty("active", self.help_mode)
+            control.style().unpolish(control)
+            control.style().polish(control)
 
     def _toggle_theme(self):
         self.dark_mode = not self.dark_mode
         self.setStyleSheet(stylesheet(self.dark_mode))
         self.theme_button.set_caption("Light mode" if self.dark_mode else "Dark mode")
         self.theme_button.set_glyph("light" if self.dark_mode else "dark")
+        self._style_transaction_values()
+
+    def _style_transaction_values(self):
+        positive = QColor("#93e2c1" if self.dark_mode else "#176548")
+        pending = QColor("#efc57d" if self.dark_mode else "#86580f")
+        negative = QColor("#f8a69a" if self.dark_mode else "#a13b34")
+        for row, tx in enumerate(self.rows):
+            status = self.transactions.item(row, 0)
+            if status:
+                confirmations = tx.get("confirmations", 0)
+                status.setForeground(negative if confirmations < 0 else pending if confirmations == 0 else positive)
+            amount = self.transactions.item(row, 3)
+            if amount and tx.get("amount", 0) > 0:
+                amount.setForeground(positive)
 
     def _install_help_targets(self):
         descriptions = {
@@ -480,9 +862,7 @@ class App(QMainWindow):
             "Generate address": "Ask Core for a fresh receiving address with your optional label.",
             "New address": "Open the receiving form to generate a fresh address.",
             "Copy address": "Copy this public address. Compare the complete pasted address with your cold signer before use.",
-            "Done": "Return to the wallet. The generated address and label are already saved in Core.",
-            "Create cold signer wallet": "Start a separate temporary signing wallet in RAM. It does not use the online wallet’s private data.",
-            "Inspect PSBT": "Ask Core to decode and analyze this PSBT without signing or broadcasting it.",
+            "Done": "Save the address label and return to the wallet.",
             "Disconnect": "Disconnect this interface. The Core node keeps running.",
             "Connect": "Connect to Core on this computer using the selected RPC port.",
             "Close": "Close this information window.",
@@ -492,11 +872,14 @@ class App(QMainWindow):
             self.search: "Filter transaction entries on this page by label, address or transaction ID.",
             self.receive_label: "An optional description stored with the new receiving address in Core.",
             self.address: "The complete public receiving address generated by Core.",
-            self.psbt: "Paste a base64 partially signed Bitcoin transaction for read-only inspection.",
             self.port: "The local Core RPC port. The connection always uses 127.0.0.1.",
+            self.transactions: "Transactions reported by Core for this wallet. Double-click a row to read its details.",
+            self.recent: "Recent wallet entries reported by Core. Double-click a row to read its details.",
+            self.addresses: "Receiving addresses and labels stored by Core. Double-click a row for details. Received totals are not spendable balances.",
+            self.sync_progress: "The portion of blockchain history verified by Bitcoin Core. Wallet balances may be incomplete until synchronization finishes.",
         }
         for widget in self.findChildren(QWidget):
-            if isinstance(widget, (QPushButton, QLineEdit, QComboBox, QPlainTextEdit, ActionRow)):
+            if isinstance(widget, (QPushButton, QLineEdit, QComboBox, QPlainTextEdit, QTableWidget, QProgressBar, ActionRow)):
                 if isinstance(widget, QPushButton):
                     text = widget.text()
                 elif hasattr(widget, "placeholderText"):
@@ -515,16 +898,78 @@ class App(QMainWindow):
             QToolTip.hideText()
         return super().eventFilter(watched, event)
 
-    def page(self, title):
-        widget, layout = page_layout(18, 16)
-        self.tabs.addTab(widget, title)
+    def page(self, title, *, scroll=False):
+        widget, layout = page_layout(22, 16, "OnlinePage")
+        if scroll:
+            viewport = QScrollArea()
+            viewport.setWidgetResizable(True)
+            viewport.setFrameShape(QFrame.Shape.NoFrame)
+            viewport.setWidget(widget)
+            self.tabs.addTab(viewport, title)
+        else:
+            self.tabs.addTab(widget, title)
         return layout
 
+    def _wallet_page_heading(self, layout, title, description=""):
+        layout.addWidget(label(title, "Title"))
+        if description:
+            detail = label(description, "PageDescription")
+            detail.setWordWrap(True)
+            layout.addWidget(detail)
+
+    def _dialog(self, title, description="", *, size=(800, 540), online=False):
+        dialog = QDialog(self)
+        dialog.setObjectName("OnlineDialog" if online else "CompanionDialog")
+        dialog.setWindowTitle(f"{title} · Core Companion")
+        dialog.resize(*size)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(20)
+        heading = QHBoxLayout()
+        copy = QVBoxLayout()
+        copy.setSpacing(8)
+        copy.addWidget(label(title, "CompactTitle"))
+        if description:
+            detail = label(description, "FormHint")
+            detail.setWordWrap(True)
+            copy.addWidget(detail)
+        heading.addLayout(copy, 1)
+        help_button = IconButton("help", "Help on" if self.help_mode else "Help", self._toggle_help_mode,
+                                 tooltip="Turn on instant explanations when hovering over a control.")
+        help_button.setProperty("helpToggle", True)
+        help_button.setProperty("active", self.help_mode)
+        help_button.installEventFilter(self)
+        heading.addWidget(help_button, 0, Qt.AlignmentFlag.AlignTop)
+        dialog_close = IconButton(
+            "close", "Close", dialog.reject,
+            tooltip="Close this window.",
+        )
+        heading.addWidget(dialog_close, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(heading)
+        return dialog, layout
+
+    def _dialog_help(self, dialog):
+        descriptions = {
+            "Close": "Close this window.",
+            "Back": "Close this form without applying changes.",
+            "Connect": "Connect to Bitcoin Core on this computer using the selected port.",
+            "Disconnect": "Disconnect this interface. The Bitcoin Core node keeps running.",
+            "Core details": "Show the complete response supplied by Bitcoin Core.",
+        }
+        for control in dialog.findChildren(QWidget):
+            if isinstance(control, (QPushButton, QLineEdit, QPlainTextEdit, QComboBox)):
+                if not control.toolTip():
+                    control.setToolTip(descriptions.get(control.text(), "Activate this control.")
+                                       if isinstance(control, QPushButton) else "Complete information supplied by Bitcoin Core.")
+                control.installEventFilter(self)
+
     def table(self, headers):
-        table = QTableWidget(0, len(headers))
+        is_addresses = "ADDRESS" in headers
+        table = EmptyTable(0, len(headers), empty_title="No saved addresses" if is_addresses else "No activity yet",
+                           empty_hint="Generate an address to see it here." if is_addresses else "Wallet transactions will appear here.")
         table.setHorizontalHeaderLabels(headers)
         table.verticalHeader().hide()
-        table.verticalHeader().setDefaultSectionSize(42)
+        table.verticalHeader().setDefaultSectionSize(48)
         table.setShowGrid(False)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -538,16 +983,14 @@ class App(QMainWindow):
 
     def _history(self):
         page = self.page("History")
+        self._wallet_page_heading(page, "Wallet activity")
         bar = QHBoxLayout()
-        bar.addWidget(button("‹  Back to wallet", lambda: self.tabs.setCurrentIndex(2)))
-        bar.addStretch()
-        bar.addWidget(label("Transactions", "Heading"))
-        bar.addStretch()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search this page…")
-        self.search.setMaximumWidth(250)
+        self.search.setMaximumWidth(340)
         self.search.textChanged.connect(self.filter_history)
         bar.addWidget(self.search)
+        bar.addStretch()
         bar.addWidget(button("↻  Refresh", self.refresh))
         page.addLayout(bar)
         self.transactions = self.table(["STATUS", "DATE", "DESCRIPTION", "AMOUNT · BTC"])
@@ -555,7 +998,7 @@ class App(QMainWindow):
         for col, width in [(0, 155), (1, 175), (3, 180)]:
             self.transactions.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
             self.transactions.setColumnWidth(col, width)
-        self.transactions.cellDoubleClicked.connect(self.transaction_details)
+        self.transactions.cellActivated.connect(self.transaction_details)
         page.addWidget(self.transactions, 1)
         bar = QHBoxLayout()
         self.page_label = label("No activity loaded", "Muted")
@@ -564,143 +1007,242 @@ class App(QMainWindow):
         bar.addWidget(button("‹  Newer", lambda: self.paginate(-100)))
         bar.addWidget(button("Older  ›", lambda: self.paginate(100)))
         page.addLayout(bar)
-        page.addWidget(label("Double-click an entry for details. A transaction can have multiple wallet entries.", "Muted"))
+        page.addWidget(label("Double-click an entry for details.", "FooterNote"))
 
     def _receive(self):
-        page = self.page("Receive")
-        page.addWidget(button("‹  Back to wallet", lambda: self.tabs.setCurrentIndex(2)))
-        page.addWidget(label("Receive bitcoin", "Heading"))
-        page.addWidget(label("Generate an address from the selected wallet’s policy in Bitcoin Core.", "Muted"))
+        page = self.page("Receive", scroll=True)
+        self._wallet_page_heading(page, "Receive Bitcoin")
         card = QFrame()
-        card.setObjectName("Card")
+        card.setObjectName("FormPanel")
+        card.setMinimumHeight(378)
         form = QVBoxLayout(card)
-        form.setContentsMargins(20, 20, 20, 20)
-        form.setSpacing(10)
-        form.addWidget(label("Label"))
-        self.receive_label = QLineEdit()
-        self.receive_label.setPlaceholderText("e.g. Savings")
-        self.receive_label.setMaximumWidth(550)
-        form.addWidget(self.receive_label)
-        row = QHBoxLayout()
-        self.generate_button = button("Generate address", self.generate, True)
-        row.addWidget(self.generate_button)
-        self.receive_done = button("Done", lambda: self.tabs.setCurrentIndex(2), True)
-        self.receive_done.hide()
-        row.addStretch()
-        form.addLayout(row)
-        form.addSpacing(8)
-        form.addWidget(label("RECEIVE BITCOIN", "Eyebrow"))
+        form.setContentsMargins(28, 28, 28, 28)
+        form.setSpacing(20)
         receive_content = QHBoxLayout()
+        receive_content.setSpacing(32)
+        self.receive_visual = QStackedWidget()
+        self.receive_visual.setFixedSize(320, 320)
+        empty = QFrame()
+        empty.setObjectName("SubtlePanel")
+        empty_layout = QVBoxLayout(empty)
+        empty_layout.setContentsMargins(24, 24, 24, 24)
+        empty_layout.setSpacing(14)
+        empty_layout.addStretch()
+        icon = LineIcon("receive", "BlueIcon", stroke_width=1.7, inset=14)
+        icon.setFixedSize(64, 64)
+        empty_layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_title = label("A new address", "EmptyTitle")
+        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_title)
+        empty_hint = label("Generate an address to show its QR code.", "EmptyHint")
+        empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_hint.setWordWrap(True)
+        empty_layout.addWidget(empty_hint)
+        empty_layout.addStretch()
+        self.receive_visual.addWidget(empty)
         self.receive_qr = QLabel()
         self.receive_qr.setObjectName("QR")
         self.receive_qr.setFixedSize(320, 320)
         self.receive_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        receive_content.addWidget(self.receive_qr, 0, Qt.AlignmentFlag.AlignTop)
+        self.receive_visual.addWidget(self.receive_qr)
+        receive_content.addWidget(self.receive_visual, 0, Qt.AlignmentFlag.AlignTop)
         address_column = QVBoxLayout()
-        address_column.addWidget(label("ADDRESS", "Eyebrow"))
+        address_column.setSpacing(12)
+        address_column.addWidget(label("Label · optional", "FieldLabel"))
+        self.receive_label = QLineEdit()
+        self.receive_label.setPlaceholderText("e.g. Savings")
+        address_column.addWidget(self.receive_label)
+        row = QHBoxLayout()
+        self.generate_button = button("Generate address", self.generate, True)
+        row.addWidget(self.generate_button)
+        row.addStretch()
+        address_column.addLayout(row)
+        self.receive_details = QWidget()
+        details = QVBoxLayout(self.receive_details)
+        details.setContentsMargins(0, 12, 0, 0)
+        details.setSpacing(12)
+        self.receive_used = label("Address ready", "InlineNotice")
+        self.receive_used.setProperty("tone", "success")
+        details.addWidget(self.receive_used)
+        self.receive_mark_used = QCheckBox("Mark as used")
+        self.receive_mark_used.setToolTip("Newly generated addresses start marked used. This is a tracking label; check Core activity to confirm a payment.")
+        self.receive_mark_used.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
+        details.addWidget(self.receive_mark_used)
+        details.addWidget(label("Receiving address", "FieldLabel"))
         self.address = QLineEdit()
         self.address.setReadOnly(True)
         self.address.setPlaceholderText("Your receiving address will appear here")
         self.address.setFont(fixed_font(11))
-        address_column.addWidget(self.address)
-        self.receive_used = label("✓  Used address", "Muted")
-        self.receive_used.hide()
-        address_column.addWidget(self.receive_used)
+        details.addWidget(self.address)
         row = QHBoxLayout()
-        row.addWidget(button("Copy address", self.copy_address))
+        row.addWidget(IconButton("copy", "Copy address", self.copy_address,
+                                 tooltip="Copy the complete receiving address. Verify the pasted address on your cold signer."))
         row.addStretch()
-        address_column.addLayout(row)
+        details.addLayout(row)
+        self.receive_details.hide()
+        address_column.addWidget(self.receive_details)
         address_column.addStretch()
         receive_content.addLayout(address_column, 1)
         form.addLayout(receive_content)
         page.addWidget(card)
-        note = label("Verify the full address on your independent signer before depositing.", "Muted")
+        note = label("Verify this address on your cold signer before receiving Bitcoin.", "InfoStrip")
+        note.setMinimumHeight(58)
+        note.setStyleSheet("font-size: 16px; font-weight: 600; padding: 16px;")
         note.setWordWrap(True)
         page.addWidget(note)
         page.addStretch()
+        footer = QHBoxLayout()
+        footer.addStretch()
+        self.receive_done = button("Done", self._finish_receive, True)
+        self.receive_done.hide()
+        footer.addWidget(self.receive_done)
+        page.addLayout(footer)
 
     def _addresses(self):
         page = self.page("Addresses")
+        self._wallet_page_heading(page, "Addresses & labels")
         row = QHBoxLayout()
-        row.addWidget(button("‹  Back to wallet", lambda: self.tabs.setCurrentIndex(2)))
-        row.addWidget(label("Receiving addresses", "Heading"))
+        row.addWidget(label("RECEIVING ADDRESSES", "SectionLabel"))
         row.addStretch()
-        row.addWidget(button("New address", self._open_receive))
+        row.addWidget(button("New address", self._open_receive, True))
         page.addLayout(row)
-        page.addWidget(label("Known receiving addresses. Received amounts are lifetime totals, not spendable balances.", "Muted"))
-        self.addresses = self.table(["DESCRIPTION", "ADDRESS", "RECEIVED · BTC"])
+        self.addresses = self.table(["LABEL", "ADDRESS", "USED"])
         self.addresses.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for column, width in [(0, 170), (2, 175)]:
             self.addresses.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self.addresses.setColumnWidth(column, width)
-        self.addresses.cellDoubleClicked.connect(self.address_details)
+        self.addresses.cellActivated.connect(self.address_details)
         page.addWidget(self.addresses, 1)
-        page.addWidget(label("Change addresses and unissued descriptor addresses are not shown.", "Muted"))
+        page.addWidget(label("Received amounts are lifetime totals. Change addresses are omitted.", "FooterNote"))
 
     def _tools(self):
         page = self.page("Tools")
-        page.addWidget(button("‹  Back to wallet", lambda: self.tabs.setCurrentIndex(2)))
-        page.addWidget(label("Cold signer", "Heading"))
-        page.addWidget(label("Create a BIP39 signing wallet in a temporary, offline Bitcoin Core session.", "Muted"))
-        self.cold_button = button("Create cold signer wallet", self.start_cold_signer, True)
-        if sys.platform != "linux":
-            self.cold_button.setEnabled(False)
-            self.cold_button.setToolTip("Linux cold-signer setup is the first target.")
-        page.addWidget(self.cold_button)
-        page.addSpacing(8)
-        page.addWidget(label("Transaction inspection", "Heading"))
-        page.addWidget(label("Inspect an existing PSBT with Core. This operation does not sign or broadcast.", "Muted"))
-        self.psbt = QPlainTextEdit()
-        self.psbt.setPlaceholderText("Paste a base64 PSBT…")
-        self.psbt.setMaximumHeight(100)
-        page.addWidget(self.psbt)
-        row = QHBoxLayout()
-        row.addWidget(button("Inspect PSBT", self.inspect, True))
-        row.addStretch()
-        page.addLayout(row)
-        page.addSpacing(8)
-        page.addWidget(label(
-            "Cold signing runs in a separate temporary Bitcoin Core process. "
-            "PSBT review and signing happen there; the online node view does not handle private keys.",
-            "Muted",
-        ))
+        self._wallet_page_heading(page, "Tools & Settings")
+        self.cold_button = self.mode_continue
+        imported = ActionRow("import", "Import PSBT", "Scan a QR, paste, or load a PSBT file.",
+                             tooltip="Import a signed transaction and review it before broadcasting.", icon_key="import")
+        imported.clicked.connect(self._import_psbt_dialog)
+        page.addWidget(imported)
+        privacy = ActionRow("shield-check", "Network privacy", "Tor-only downloads and node connections.",
+                            tooltip="Change Tor-only mode. Disabling it exposes your public IP to services and peers.", icon_key="shield-check")
+        privacy.clicked.connect(self._show_privacy_page)
+        page.addWidget(privacy)
+        appearance = ActionRow("dark", "Change appearance", "", tooltip="Switch light and dark mode.", icon_key="dark")
+        appearance.clicked.connect(self._toggle_theme)
+        page.addWidget(appearance)
         page.addStretch()
 
-    def _connection_dialog(self):
-        self.connection = QDialog(self)
-        self.connection.setWindowTitle("Advanced connection · Core Companion")
-        self.connection.setMinimumWidth(580)
-        layout = QVBoxLayout(self.connection)
-        layout.setContentsMargins(24, 24, 24, 22)
-        layout.setSpacing(12)
-        layout.addWidget(label("Advanced connection", "Heading"))
-        layout.addWidget(label(
-            "Use these options only if automatic local detection does not work.", "Muted",
-        ))
+    def _connection_page(self):
+        layout = self.page("Connection")
+        self.connection_page_index = self.tabs.count() - 1
+        self.connection_return_index = 0
+        self._wallet_page_heading(layout, "Bitcoin Core connection", "Local RPC connection on this computer.")
+        panel = QFrame()
+        panel.setObjectName("FormPanel")
+        content = QVBoxLayout(panel)
+        content.setContentsMargins(22, 20, 22, 20)
+        content.setSpacing(16)
+        self.connection_status = label(self.core_status.text(), "CoreStatus")
+        self.connection_status.setWordWrap(True)
+        content.addWidget(self.connection_status)
+        self.connection_binary = label("", "FormHint")
+        self.connection_binary.setWordWrap(True)
+        content.addWidget(self.connection_binary)
+        self.connection_version = label("", "FormHint")
+        content.addWidget(self.connection_version)
         form = QFormLayout()
         form.setSpacing(12)
         self.port = QLineEdit("8332")
+        self.port.setReadOnly(self.tor_enabled)
+        self.port.setToolTip("The local Bitcoin Core RPC port. Connections always use 127.0.0.1.")
         form.addRow("Core port", self.port)
-        layout.addLayout(form)
+        content.addLayout(form)
         note = label(
-            "Companion finds Core's local connection automatically. Keep Core running on this computer "
-            "with local RPC enabled. Only loaded watch-only wallets appear.",
-            "Muted",
+            "Local authentication is automatic. Change the port only if Core uses a different one.", "FormHint",
         )
         note.setWordWrap(True)
-        layout.addWidget(note)
+        content.addWidget(note)
+        layout.addWidget(panel)
+        layout.addStretch()
         row = QHBoxLayout()
         row.addWidget(button("Disconnect", self.disconnect))
         row.addStretch()
         row.addWidget(button("Connect", self.connect, True))
         layout.addLayout(row)
+        self.connection_page = self.tabs.widget(self.connection_page_index)
+
+    def _close_connection_page(self):
+        if self.tabs.currentIndex() != getattr(self, "connection_page_index", -1):
+            return
+        target = getattr(self, "connection_return_index", 0)
+        if target == self.connection_page_index or not 0 <= target < self.tabs.count():
+            target = 0
+        self.tabs.setCurrentIndex(target)
+
+    def _privacy_page(self):
+        layout = self.page("Network privacy")
+        self.privacy_page_index = self.tabs.count() - 1
+        self._wallet_page_heading(layout, "Network privacy", "Choose how this installation reaches Bitcoin services and peers.")
+        panel = QFrame()
+        panel.setObjectName("FormPanel")
+        content = QVBoxLayout(panel)
+        content.setContentsMargins(22, 20, 22, 20)
+        content.setSpacing(16)
+        self.privacy_choice = QCheckBox("Tor only · recommended")
+        self.privacy_choice.setChecked(self.tor_enabled)
+        self.privacy_choice.setToolTip("Route Bitcoin Core downloads and managed node connections through Tor. There is no direct fallback.")
+        content.addWidget(self.privacy_choice)
+        self.privacy_ack = QCheckBox("I understand Core services and peers can see my public IP")
+        self.privacy_ack.setToolTip("Required to disable Tor-only routing. Your managed Core connection will stop before the new setting takes effect.")
+        self.privacy_ack.hide()
+        content.addWidget(self.privacy_ack)
+        note = label(
+            "If Tor stops, downloads and node connections stop. Disabling Tor exposes your public IP to download services and Bitcoin peers.",
+            "InfoStrip",
+        )
+        note.setWordWrap(True)
+        content.addWidget(note)
+        other_apps = label("This setting applies to Core Companion. Other apps and separately running nodes keep their own network settings.", "FormHint")
+        other_apps.setWordWrap(True)
+        content.addWidget(other_apps)
+        layout.addWidget(panel)
+        layout.addStretch()
+        footer = QHBoxLayout()
+        footer.addWidget(button("Back to Tools", lambda: self.tabs.setCurrentIndex(6)))
+        footer.addStretch()
+        self.privacy_apply_button = button("Apply", self._apply_privacy_page, True)
+        footer.addWidget(self.privacy_apply_button)
+        layout.addLayout(footer)
+        self.privacy_choice.toggled.connect(self._update_privacy_page)
+        self.privacy_ack.toggled.connect(self._update_privacy_page)
+        self._update_privacy_page()
+
+    def _update_privacy_page(self, *_args):
+        disabling = self.tor_enabled and not self.privacy_choice.isChecked()
+        self.privacy_ack.setVisible(disabling)
+        self.privacy_apply_button.setEnabled(not disabling or self.privacy_ack.isChecked())
+
+    def _apply_privacy_page(self):
+        selected = self.privacy_choice.isChecked()
+        if self.tor_enabled and not selected and not self.privacy_ack.isChecked():
+            return
+        self._privacy_toggled(selected, confirmed=not selected and self.privacy_ack.isChecked())
+        if self.tor_enabled == selected:
+            self.tabs.setCurrentIndex(6)
 
     def show_connection(self):
-        if self.tabs.currentIndex() not in (0, 1):
+        if not self._allow_online():
+            return
+        current = self.tabs.currentIndex()
+        if current != self.connection_page_index:
+            self.connection_return_index = current
+        if current not in (0, 1):
             self.connection_purpose = "online"
-        self.connection.show()
-        self.connection.raise_()
-        self.connection.activateWindow()
+        managed = self.managed_core_process
+        binary = managed.program() if managed is not None else ""
+        self.connection_binary.setText("Executable: " + binary if binary else "Executable: external Core (path is not reported by RPC)")
+        self.connection_version.setText("Core version: " + str(getattr(self, "node_info", {}).get("subversion", "Not connected")))
+        self.tabs.setCurrentIndex(self.connection_page_index)
 
     def _installed_core_binary(self):
         root = companion_data_dir() / "bitcoin-core"
@@ -713,25 +1255,55 @@ class App(QMainWindow):
         if self.service is None:
             self.statusBar().showMessage("Connect to your online node first.")
             return
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Import watch-only wallet")
-        dialog.resize(720, 460)
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._dialog("Import your wallet", "Scan the public wallet exported by your cold signer.", size=(800, 650), online=True)
+        panel = QFrame()
+        panel.setObjectName("FormPanel")
+        fields = QVBoxLayout(panel)
+        fields.setContentsMargins(22, 20, 22, 20)
+        fields.setSpacing(14)
+        fields.addWidget(label("Wallet name", "FieldLabel"))
         name = QLineEdit()
         name.setPlaceholderText("Wallet name")
         name.setToolTip("A name for the new watch-only wallet stored by Core on this computer.")
         name.installEventFilter(self)
-        layout.addWidget(name)
+        fields.addWidget(name)
+        fields.addWidget(label("Public wallet", "FieldLabel"))
         payload = QPlainTextEdit()
-        payload.setPlaceholderText("Scan the cold signer’s public wallet QR, or paste public descriptors")
-        payload.setToolTip("Public descriptors define the wallet’s addresses. Never paste recovery words or private keys here.")
+        payload.setPlaceholderText("Scan or paste a descriptor, xpub or zpub")
+        payload.setFont(fixed_font(10))
+        payload.setToolTip("Import a public descriptor, account xpub or zpub. Bare xpubs use native SegWit; use a descriptor for another address type or hardware signing origin. Never paste recovery words or private keys.")
         payload.installEventFilter(self)
-        layout.addWidget(payload)
+        fields.addWidget(payload, 1)
+        fields.addWidget(label("Wallet history", "FieldLabel"))
+        history_mode = QComboBox()
+        history_mode.addItem("Scan all history (safest)", 0)
+        history_mode.addItem("Start from a known date", 1)
+        history_mode.setToolTip("A zpub does not contain the wallet's first-use date. Core must scan history to find earlier transactions.")
+        fields.addWidget(history_mode)
+        history_start_date = QDateEdit()
+        history_start_date.setCalendarPopup(True)
+        history_start_date.setDisplayFormat("d MMM yyyy")
+        history_start_date.setMinimumDate(QDate(2009, 1, 3))
+        history_start_date.setMaximumDate(QDate.currentDate())
+        history_start_date.setDate(QDate(2009, 1, 3))
+        history_start_date.setToolTip("Choose the earliest date this wallet could have received Bitcoin. Core starts scanning one day earlier.")
+        history_start_date.setVisible(False)
+        fields.addWidget(history_start_date)
+        history_mode.currentIndexChanged.connect(
+            lambda _index: history_start_date.setVisible(history_mode.currentData() == 1)
+        )
+        history_hint = label(
+            "If you are unsure, scan all history. A pruned node cannot scan blocks it has already discarded.",
+            "FormHint",
+        )
+        history_hint.setWordWrap(True)
+        fields.addWidget(history_hint)
         scanner = QRScanner(dialog)
         scan = button("Scan QR", scanner.scan)
         scan.setToolTip("Open the camera to scan the public wallet exported by your cold signer.")
         scan.installEventFilter(self)
-        layout.addWidget(scan)
+        fields.addWidget(scan, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(panel, 1)
 
         def read_scan(text):
             payload.setPlainText(text)
@@ -759,12 +1331,58 @@ class App(QMainWindow):
                 QMessageBox.warning(dialog, "Wallet data", "The wallet QR could not be read.")
                 return
             wallet_name = name.text().strip() or str(data.get("name", "")).strip()
+            if history_mode.currentData() == 0:
+                history_timestamp = 0
+            else:
+                selected_date = datetime.strptime(
+                    history_start_date.date().toString("yyyy-MM-dd"), "%Y-%m-%d"
+                ).replace(tzinfo=timezone.utc)
+                history_timestamp = max(0, int(selected_date.timestamp()) - 86400)
             service = self.service
+            progress_rpc = CoreRPC(self.port.text(), service.rpc.cookie_path)
+            self.connection_purpose = "online"
             scanner.stop()
             dialog.accept()
-            self.task("Importing wallet and scanning blockchain history…",
-                      lambda: service.import_public_wallet(wallet_name, descriptors),
-                      lambda result: self.connected(service, result, wallet_name))
+            self._set_wallet_scan_progress(None)
+
+            def import_with_progress():
+                stopped = threading.Event()
+
+                def monitor_scan():
+                    scan_seen = False
+                    while not stopped.wait(1):
+                        try:
+                            info = progress_rpc.call("getwalletinfo", wallet=wallet_name, timeout=5)
+                        except CoreError:
+                            continue
+                        scanning = info.get("scanning")
+                        if isinstance(scanning, dict):
+                            scan_seen = True
+                            try:
+                                progress = float(scanning.get("progress", 0))
+                            except (TypeError, ValueError):
+                                continue
+                            if not stopped.is_set():
+                                self.wallet_scan_progress_events.put(max(0.0, min(1.0, progress)))
+                        elif scanning is False and scan_seen:
+                            if not stopped.is_set():
+                                self.wallet_scan_progress_events.put(1.0)
+                            return
+
+                monitor = threading.Thread(target=monitor_scan, daemon=True)
+                monitor.start()
+                try:
+                    return service.import_public_wallet(
+                        wallet_name, descriptors, timestamp=history_timestamp
+                    )
+                finally:
+                    stopped.set()
+
+            self.task(
+                "Importing wallet and scanning blockchain history…",
+                import_with_progress,
+                lambda result: self.connected(service, result, wallet_name),
+            )
 
         footer = QHBoxLayout()
         back = button("Back", dialog.reject)
@@ -777,10 +1395,13 @@ class App(QMainWindow):
         proceed.installEventFilter(self)
         footer.addWidget(proceed)
         layout.addLayout(footer)
+        self._dialog_help(dialog)
         dialog.exec()
         scanner.stop()
 
     def download_bitcoin_core(self):
+        if not self._allow_online():
+            return
         if sys.platform != "linux":
             QMessageBox.information(
                 self,
@@ -793,13 +1414,15 @@ class App(QMainWindow):
             return
         if self.core_download_process is not None:
             return
-        missing = [tool for tool in ("gpg", "wget") if not _system_tool(tool)]
+        missing = [tool for tool in ("gpg", "curl") if not _system_tool(tool)]
         if missing:
             QMessageBox.warning(
                 self,
                 "Verification tools required",
-                "Install the verification tools with `sudo apt install gnupg wget`, then try again.",
+                "Install the verification tools with `sudo apt install gnupg curl`, then try again.",
             )
+            return
+        if not self._ensure_tor(self.download_bitcoin_core):
             return
         self.core_download_stderr = ""
         self.core_download_cancelled = False
@@ -814,7 +1437,10 @@ class App(QMainWindow):
             lambda code, status, p=process: self._core_download_finished(p, code, status)
         )
         process.errorOccurred.connect(lambda error, p=process: self._core_download_error(p, error))
-        process.start(sys.executable, ["-E", "-s", "-B", str(Path(__file__).with_name("core_download.py"))])
+        arguments = ["-E", "-s", "-B", str(Path(__file__).with_name("core_download.py"))]
+        if self.tor_enabled:
+            arguments += ["--tor-proxy", self.tor.proxy]
+        process.start(sys.executable, arguments)
 
     def _read_core_download_error(self, process):
         self.core_download_stderr = (self.core_download_stderr + bytes(process.readAllStandardError()).decode("utf-8", "replace"))[-6000:]
@@ -838,7 +1464,8 @@ class App(QMainWindow):
             return
         if self.core_download_cancelled:
             self.core_download_cancelled = False
-            self._set_core_status("Bitcoin Core download cancelled")
+            self._stop_download_tor()
+            self.refresh_core_availability()
             self.statusBar().showMessage("Bitcoin Core download cancelled")
             return
         try:
@@ -846,6 +1473,7 @@ class App(QMainWindow):
         except (json.JSONDecodeError, TypeError):
             result = {"ok": False, "error": "The download helper returned no valid result."}
         if exit_status != QProcess.ExitStatus.NormalExit or exit_code != 0 or not result.get("ok"):
+            self._stop_download_tor()
             self._set_core_status("Bitcoin Core download was not verified", "error")
             detail = result.get("error", "The verification process stopped.")
             logs = self.core_download_stderr.strip()
@@ -854,36 +1482,63 @@ class App(QMainWindow):
             QMessageBox.critical(self, "Bitcoin Core was not installed", detail)
             return
         self.downloaded_bitcoind = result["path"]
-        self._set_core_status(f"Bitcoin Core {result['version']} verified and installed")
-        if self.mode_choice == "online":
+        self._set_core_status("Bitcoin Core is verified", "verified")
+        self.core_status_hint.setText(
+            f"Bitcoin Core {result['version']} passed verification and is installed. Ready to continue."
+        )
+        if self.mode_choice == "online" and self.online_node_requested:
             self._start_managed_node(result["path"])
         else:
-            self.statusBar().showMessage("Core is ready. Choose Online Node to start syncing and connect.")
+            self._stop_download_tor()
+            self.statusBar().showMessage("Core is verified. Tor is stopped; Core stays offline until you start Online Node.")
+
+    def _stop_download_tor(self):
+        self.tor_pending = None
+        if self.tor.process is not None:
+            self.tor.stop()
+        self.network.setText("○ Offline")
 
     def _use_core_connection(self, cookie_path, port):
         self.core_cookie_path = Path(cookie_path)
         self.port.setText(str(port))
 
     def _start_managed_node(self, binary=None, *, prefer_existing=True):
+        if not self._allow_online():
+            return
+        if self.mode_choice != "online" or not self.online_node_requested:
+            self.statusBar().showMessage("Choose Online Node and continue before starting blockchain sync.")
+            return
         if sys.platform != "linux":
             self.statusBar().showMessage("Starting a downloaded Core node is available on Linux.")
             return
-        default_cookie = default_cookie_path()
-        if prefer_existing and default_cookie.is_file():
+        default_cookie = self._core_cookie()
+        if not self.tor_enabled and prefer_existing and default_cookie.is_file():
             self._use_core_connection(default_cookie, 8332)
             self.connect()
             return
 
         binary = Path(binary) if binary else self._installed_core_binary()
         if not binary or not binary.is_file():
-            self._set_core_status("Download and verify Bitcoin Core first", "error")
+            self._set_core_status("Install verified Core from offline media" if self.cold_required else "Download and verify Bitcoin Core first", "error")
             self.statusBar().showMessage("Download and verify Bitcoin Core from Welcome, then choose Online Node.")
             return
 
+        if not self._ensure_tor(lambda: self._start_managed_node(binary, prefer_existing=prefer_existing)):
+            return
         data_dir = managed_node_dir()
         cookie = data_dir / ".cookie"
-        self._use_core_connection(cookie, MANAGED_RPC_PORT)
-        if prefer_existing and cookie.is_file():
+        if self.managed_core_process is not None and self.managed_core_process.poll() is None:
+            self._use_core_connection(cookie, self.managed_rpc_port)
+            self.connect()
+            return
+        if self.tor_enabled:
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                self.managed_rpc_port = listener.getsockname()[1]
+        else:
+            self.managed_rpc_port = MANAGED_RPC_PORT
+        self._use_core_connection(cookie, self.managed_rpc_port)
+        if not self.tor_enabled and prefer_existing and cookie.is_file():
             self._set_core_status("Connecting to your Bitcoin Core node…")
             self.connect()
             return
@@ -899,8 +1554,12 @@ class App(QMainWindow):
                 "-rpcallowip=127.0.0.1",
                 "-daemon=0",
                 "-server=1",
+                f"-rpcport={self.managed_rpc_port}",
                 f"-prune={PRUNE_TARGET_MIB}",
             ]
+            if self.tor_enabled:
+                arguments += core_tor_arguments(self.tor.proxy)
+            self.managed_node_tor_proxy = self.tor.proxy if self.tor_enabled else None
             with (data_dir / "companion-startup.log").open("ab", buffering=0) as log_file:
                 self.managed_core_process = subprocess.Popen(
                     [str(binary), *arguments],
@@ -947,9 +1606,11 @@ class App(QMainWindow):
             return
         if self.core_download_cancelled:
             self.core_download_cancelled = False
+            self._stop_download_tor()
             self._set_core_status("Bitcoin Core download cancelled")
             self.statusBar().showMessage("Bitcoin Core download cancelled")
             return
+        self._stop_download_tor()
         self._set_core_status("Bitcoin Core download could not start", "error")
         QMessageBox.critical(
             self,
@@ -979,8 +1640,8 @@ class App(QMainWindow):
             self.statusBar().showMessage("Finish or cancel the Core download before starting cold storage.")
             return
         if not self._installed_core_binary():
-            self._set_core_status("Download and verify Bitcoin Core first", "error")
-            self.statusBar().showMessage("Download and verify Core on Welcome before starting cold storage.")
+            self._set_core_status("Install verified Core from offline media" if self.cold_required else "Download and verify Bitcoin Core first", "error")
+            self.statusBar().showMessage("Never reconnect. Transfer a verified Core installation from trusted offline media." if self.cold_required else "Download and verify Core on Welcome before starting cold storage.")
             self.tabs.setCurrentIndex(0)
             return
         if self.busy:
@@ -1013,10 +1674,29 @@ class App(QMainWindow):
                 return
         bitcoind = self._installed_core_binary()
         if not bitcoind:
-            self._set_core_status("Download and verify Bitcoin Core first", "error")
-            self.statusBar().showMessage("Download and verify Core on Welcome before starting cold storage.")
+            self._set_core_status("Install verified Core from offline media" if self.cold_required else "Download and verify Bitcoin Core first", "error")
+            self.statusBar().showMessage("Never reconnect. Transfer a verified Core installation from trusted offline media." if self.cold_required else "Download and verify Core on Welcome before starting cold storage.")
             self.tabs.setCurrentIndex(0)
             return
+        if not self.permanent_acknowledgement.isChecked():
+            return
+        if self.tor_install_process is not None:
+            self.statusBar().showMessage("Wait for Tor installation to finish before cold setup.")
+            return
+        if not self._stop_managed_node():
+            return
+        self.tor_pending = None
+        self.tor.stop()
+        if not self.dev_keep_network:
+            try:
+                PermanentAirgap.activate()
+            except (ColdSetupError, OSError) as exc:
+                if PermanentAirgap.is_committed():
+                    self._lock_cold_installation()
+                QMessageBox.critical(self, "Permanent offline setup incomplete",
+                    str(exc) + "\n\nNo signer was started. This app will not enable networking. Keep this computer offline and retry setup.")
+                return
+            self._lock_cold_installation()
         session = ColdSystemSession(disable_networking=not self.dev_keep_network)
         self.cold_session = session
         try:
@@ -1038,7 +1718,9 @@ class App(QMainWindow):
                 self.cold_session = None
                 QMessageBox.critical(self, "Cold signer could not start", str(exc))
             return
+        self.network.setText("DEVELOPMENT · NOT AIR-GAPPED" if self.dev_keep_network else "● Permanent offline policy verified")
         self.cold_session_id = secrets.token_hex(16)
+        self.cold_return_index = self.cold_notice_previous if 0 <= self.cold_notice_previous < self.tabs.count() else 1
         self.isolation_timer.start()
         self.sync_timer.stop()
         self.node_start_timer.stop()
@@ -1047,7 +1729,7 @@ class App(QMainWindow):
         self.cold_button_top.setEnabled(False)
         self.statusBar().showMessage(
             "DEV MODE · host networking on · Core P2P off · swap off"
-            if self.dev_keep_network else "Cold session active · networking and swap are off"
+            if self.dev_keep_network else "Permanent offline policy verified · swap off"
         )
         process = QProcess(self)
         self.cold_process = process
@@ -1060,13 +1742,41 @@ class App(QMainWindow):
         if self.dev_keep_network:
             arguments.append("--dev-keep-network")
         process.setArguments(arguments)
+        self.cold_helper_failed = False
+        self.cold_helper_ready = False
+        self.cold_helper_failure = ""
+        self.cold_helper_error_shown = False
         process.started.connect(lambda: setattr(self, "cold_process_group", int(process.processId())))
-        process.readyReadStandardOutput.connect(
-            lambda: self.hide() if process.canReadLine() and bytes(process.readLine()).strip() == b"COLD_SIGNER_READY" else None
-        )
+        process.readyReadStandardOutput.connect(lambda p=process: self._cold_helper_ready(p))
         process.finished.connect(self._cold_helper_finished)
         process.errorOccurred.connect(self._cold_helper_error)
+        self.statusBar().showMessage("Starting the isolated cold signer…")
         process.start()
+
+    def _cold_helper_ready(self, process):
+        if process is not self.cold_process:
+            return
+        while process.canReadLine():
+            line = bytes(process.readLine()).strip()
+            if line.startswith(b"COLD_SIGNER_FAILED"):
+                self.cold_helper_failed = True
+                self.cold_helper_failure = line.partition(b" ")[2].decode("utf-8", "replace")[:1600]
+                return
+            if line != b"COLD_SIGNER_READY":
+                continue
+            self.cold_helper_ready = True
+            # Keep the online shell visible while temporary Core starts. Hand
+            # off only when the isolated signer is ready to show its own UI.
+            self.hide()
+            if process.write(b"SHOW\n") < 0:
+                self.cold_helper_failed = True
+                self.cold_helper_failure = "The isolated signer did not accept the startup handoff."
+                process.terminate()
+                self.show()
+                self.raise_()
+                self.activateWindow()
+                self.statusBar().showMessage("Could not open the isolated signer. Try again.")
+            return
 
     def _check_cold_isolation(self):
         if not self.cold_session or self.cold_restoring:
@@ -1194,27 +1904,104 @@ class App(QMainWindow):
         self.cold_button_top.setEnabled(True)
         self.statusBar().showMessage(
             "Cold session closed · swap restored; networking was left on"
-            if self.dev_keep_network else "Cold session closed · previous network and swap settings restored"
+            if self.dev_keep_network else "Cold session closed · swap restored · networking remains permanently disabled"
         )
+        if not self.dev_keep_network:
+            try:
+                PermanentAirgap.assert_enforced()
+                self.network.setText("● Permanent offline policy verified")
+            except ColdSetupError:
+                self.network.setText("○ Offline protection NOT verified")
+                self.statusBar().showMessage("Signer stopped · offline protection cannot be verified · keep this computer disconnected")
 
     def _cold_helper_finished(self, exit_code, exit_status):
+        failed = (
+            self.cold_helper_failed
+            or not self.cold_helper_ready
+            or exit_status != QProcess.ExitStatus.NormalExit
+            or exit_code != 0
+        )
         self._restore_cold_system()
-        self.tabs.setCurrentIndex(1)
+        target = self.cold_return_index
+        self.tabs.setCurrentIndex(target if 0 <= target < self.tabs.count() else 1)
         self.show()
         self.raise_()
+        self.activateWindow()
+        if failed and not self.cold_helper_error_shown:
+            self.cold_helper_error_shown = True
+            detail = self.cold_helper_failure or (
+                f"The isolated signer stopped before opening (exit {exit_code})."
+            )
+            QMessageBox.critical(
+                self,
+                "Cold signer could not start",
+                detail + "\n\nNo signer window was opened. Correct the issue and try again.",
+            )
 
     def _cold_helper_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
             self._restore_cold_system()
-            QMessageBox.critical(self, "Cold signer could not open", "The cold signer helper process could not be started.")
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self.cold_helper_error_shown = True
+            QMessageBox.critical(
+                self,
+                "Cold signer could not open",
+                "The isolated signer process could not be started. Check the installation and try again.",
+            )
+
+    def _set_wallet_scan_progress(self, progress):
+        if not hasattr(self, "wallet_scan_label"):
+            return
+        self.wallet_scan_label.show()
+        self.wallet_scan_progress.show()
+        if progress is None:
+            self.wallet_scan_label.setText("Wallet history scan · waiting for Core")
+            self.wallet_scan_progress.setRange(0, 0)
+            return
+        percent = max(0, min(100, round(float(progress) * 100)))
+        self.wallet_scan_label.setText(
+            f"Wallet history scan · {percent}% · balances may be incomplete"
+        )
+        self.wallet_scan_progress.setRange(0, 100)
+        self.wallet_scan_progress.setValue(percent)
 
     def _drain(self):
+        while True:
+            try:
+                progress = self.wallet_scan_progress_events.get_nowait()
+            except queue.Empty:
+                break
+            self._set_wallet_scan_progress(progress)
         try:
             done, result, error = self.events.get_nowait()
         except queue.Empty:
             return
         self.busy = False
         self.wallet_picker.setEnabled(True)
+        self.wallet_scan_label.hide()
+        self.wallet_scan_progress.hide()
+        if self.local_probe_pending:
+            self.local_probe_pending = False
+            self.local_core_check_button.setEnabled(
+                self.mode_choice != "cold" and not self.cold_required
+            )
+            if error:
+                self._set_core_status("Could not connect to Bitcoin Core", "error")
+                self.core_status_hint.setText(
+                    "Check that Core is running in this data folder, choose another folder, or download and verify Core below."
+                )
+                self.statusBar().showMessage(
+                    "No node was started. Check the Core data folder or verify a Core download."
+                )
+                return
+            try:
+                self._local_core_check_complete(result)
+            except Exception:
+                self._set_core_status("Core returned an unreadable local status.", "error")
+                self.statusBar().showMessage("No node was started. Review Core compatibility before connecting.")
+            return
         if self.pending_cold_start:
             self.pending_cold_start = False
             self.connection_fallback = False
@@ -1238,6 +2025,10 @@ class App(QMainWindow):
                 return
             if self.service is None:
                 self._set_core_status("Could not connect. Check that Core is running.", "error")
+                if self.local_probe_pending is False and hasattr(self, "core_status_hint"):
+                    self.core_status_hint.setText(
+                        "Check the selected Core data folder, or download and verify Core below."
+                    )
             self.statusBar().showMessage(error)
         else:
             try:
@@ -1265,6 +2056,7 @@ class App(QMainWindow):
 
     def _clear(self):
         self.wallet_content.hide()
+        self.wallet_empty.show()
         self.wallet_picker.hide()
         self.wallet_picker.blockSignals(True)
         self.wallet_picker.clear()
@@ -1272,17 +2064,11 @@ class App(QMainWindow):
         for field in (self.balance, self.pending, self.immature):
             field.setText("—")
         self.online_name.setText("Connect to Bitcoin Core")
-        self.sync_label.setText("Blockchain sync · not connected")
+        self.sync_label.setText("Blockchain sync · not started")
         self.sync_detail.setText("Local Bitcoin Core")
         self.sync_progress.setValue(0)
         self._set_core_status("Bitcoin Core not connected", "error")
-        self.address.clear()
-        self.receive_qr.clear()
-        self.psbt.clear()
-        self.receive_label.clear()
-        self.receive_done.hide()
-        self.receive_used.hide()
-        self.generate_button.show()
+        self._reset_receive()
         self.transactions.setRowCount(0)
         self.recent.setRowCount(0)
         self.addresses.setRowCount(0)
@@ -1292,8 +2078,25 @@ class App(QMainWindow):
         self.network.setText("○  Offline")
 
     def connect(self):
+        if not self._allow_online():
+            return
+        if self.mode_choice != "online" or not self.online_node_requested:
+            self.statusBar().showMessage("Choose Online Node and continue before connecting to Bitcoin Core.")
+            self.tabs.setCurrentIndex(1)
+            return
+        self.online_node_requested = True
         if self.busy:
             return
+        if not self._ensure_tor(self.connect):
+            return
+        if self.tor_enabled:
+            if self.managed_core_process is None or self.managed_core_process.poll() is not None:
+                self._start_managed_node(prefer_existing=False)
+                return
+            if self.managed_node_tor_proxy != self.tor.proxy:
+                self._set_core_status("Restart the managed node to apply Tor-only mode", "error")
+                return
+            self._use_core_connection(managed_node_dir() / ".cookie", self.managed_rpc_port)
         try:
             cookie_path = self.core_cookie_path or default_cookie_path()
             if not cookie_path.is_file() and sys.platform == "linux" and self._installed_core_binary():
@@ -1346,6 +2149,18 @@ class App(QMainWindow):
         )
 
     def connected(self, service, data, selected_wallet=None):
+        if self.cold_required:
+            self.service = None
+            return
+        if self.tor_enabled:
+            try:
+                assert_core_tor(data["node"], self.tor.proxy)
+            except (ValueError, KeyError, TypeError) as exc:
+                self._stop_managed_node()
+                self._clear()
+                self._set_core_status("Core did not confirm Tor-only protection", "error")
+                self.statusBar().showMessage(str(exc))
+                return
         self.connection_fallback = False
         self.node_start_timer.stop()
         if data["chain"].get("chain") != "main":
@@ -1353,10 +2168,10 @@ class App(QMainWindow):
             self._clear()
             self.statusBar().showMessage("This wallet view is set up for the expected Bitcoin chain only.")
             return
-        self.connection.hide()
         self.service = service
+        self.node_info = data["node"]
         self._set_core_status("Bitcoin Core connected", "connected")
-        self.tabs.setCurrentIndex(1 if self.connection_purpose == "welcome" else 2)
+        self.tabs.setCurrentIndex(2 if selected_wallet else (1 if self.connection_purpose == "welcome" else 2))
         self.update_sync_status(data["chain"])
         self.sync_timer.start()
         self.wallet_picker.blockSignals(True)
@@ -1366,12 +2181,12 @@ class App(QMainWindow):
             self.wallet_picker.setCurrentText(selected_wallet)
         self.wallet_picker.blockSignals(False)
         self.wallet_content.setVisible(bool(data["wallets"]))
+        self.wallet_empty.setVisible(not bool(data["wallets"]))
         self.wallet_picker.setVisible(bool(data["wallets"]))
         if data["wallets"]:
             self.refresh()
         else:
-            self.online_name.setText("No watch-only wallet loaded")
-            self.sync_label.setText("Core is connected")
+            self.online_name.setText("Your online node")
             self.statusBar().showMessage(
                 "Import the public wallet QR from your cold signer."
             )
@@ -1382,19 +2197,15 @@ class App(QMainWindow):
             self.service = None
             self._clear()
             self.setWindowTitle("Core Companion")
-            self.connection.hide()
+            if self.tabs.currentIndex() == self.connection_page_index:
+                self._close_connection_page()
             self.statusBar().showMessage("Disconnected")
 
     def select_wallet(self, name):
         if not name or self.busy:
             return
         self.setWindowTitle(f"Core Companion — {name}")
-        self.address.clear()
-        self.receive_qr.clear()
-        self.receive_label.clear()
-        self.receive_done.hide()
-        self.receive_used.hide()
-        self.generate_button.show()
+        self._reset_receive()
         self.skip = 0
         self.transactions.setRowCount(0)
         self.recent.setRowCount(0)
@@ -1418,6 +2229,7 @@ class App(QMainWindow):
         self.balance.setText(total("trusted"))
         self.pending.setText(total("untrusted_pending"))
         self.immature.setText(total("immature"))
+        self.immature.parentWidget().setVisible(any(group.get("immature", 0) > 0 for group in groups))
         info, chain = data["info"], data["chain"]
         self.online_name.setText(f"{info['walletname']} (watch-only)")
         self.update_sync_status(chain)
@@ -1426,19 +2238,15 @@ class App(QMainWindow):
         self.recent.setRowCount(min(4, len(self.rows)))
         for row, tx in enumerate(self.rows):
             confirmations = tx.get("confirmations", 0)
-            status = "Conflicted" if confirmations < 0 else ("Abandoned" if tx.get("abandoned") else ("Unconfirmed" if confirmations == 0 else f"✓  {confirmations} confirmed"))
+            status = "Conflicted" if confirmations < 0 else ("Abandoned" if tx.get("abandoned") else ("Unconfirmed" if confirmations == 0 else f"{confirmations} confirmed"))
             amount = tx.get("amount", 0)
             values = [status, datetime.fromtimestamp(tx.get("time", 0)).strftime("%d %b %Y · %H:%M"), tx.get("label") or tx.get("category", ""), ("+" if amount > 0 else "") + btc(amount)]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(tx.get("txid", ""))
-                if column == 0:
-                    item.setForeground(QColor("#a97919" if confirmations == 0 else ("#b54c4c" if confirmations < 0 else "#427e68")))
                 if column == 3:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     item.setFont(fixed_font(11))
-                    if amount > 0:
-                        item.setForeground(QColor("#2c8265"))
                 self.transactions.setItem(row, column, item)
             if row < 4:
                 recent_values = [
@@ -1452,17 +2260,26 @@ class App(QMainWindow):
                         recent_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                         recent_item.setFont(fixed_font(10))
                     self.recent.setItem(row, column, recent_item)
-        self.address_rows = data["addresses"]
+        preferences = self._address_preferences()
+        self.address_rows = [item for item in data["addresses"] if not preferences.get(item["address"], {}).get("hidden") ]
         self.addresses.setRowCount(len(self.address_rows))
         for row, address in enumerate(self.address_rows):
-            for column, value in enumerate([address.get("label", ""), address["address"], btc(address.get("amount", 0))]):
+            for column, value in enumerate([address.get("label", ""), address["address"], ("✓" if preferences.get(address["address"], {}).get("used", address.get("amount", 0) > 0) else "—")]):
                 item = QTableWidgetItem(value)
                 if column in (1, 2):
                     item.setFont(fixed_font(10))
+                if column == 2:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    font = item.font()
+                    font.setPointSize(18)
+                    item.setFont(font)
                 self.addresses.setItem(row, column, item)
         self.page_label.setText(f"{len(self.rows)} entries  ·  page {self.skip // 100 + 1}")
+        self._style_transaction_values()
         self.filter_history()
-        self.network.setText(f"●  Bitcoin Core · block {chain['blocks']:,}")
+        self.network.setText(("● Tor only" if self.tor_enabled and self.tor.bootstrapped else
+                              "○ Tor unavailable · no direct fallback" if self.tor_enabled else "● Direct connection")
+                             + f" · block {chain['blocks']:,}")
         if info.get("scanning"):
             message = "Core is rescanning. Wallet balances and activity may be incomplete."
         elif chain.get("initialblockdownload"):
@@ -1475,6 +2292,9 @@ class App(QMainWindow):
         query = self.search.text().casefold()
         for row, tx in enumerate(self.rows):
             self.transactions.setRowHidden(row, query not in json.dumps(tx, default=str).casefold())
+        self.transactions.set_empty_message("No matching activity" if query else "No activity yet",
+                                            "Try a different search." if query else "Wallet transactions will appear here.")
+        self.transactions.update_empty_state()
 
     def paginate(self, delta):
         if not self.busy and self.service:
@@ -1485,22 +2305,38 @@ class App(QMainWindow):
         if not self.service or not self.wallet_picker.currentText():
             self.statusBar().showMessage("Connect and select a wallet first.")
             return
+        if self.busy:
+            QTimer.singleShot(150, lambda: self.generate() if self.tabs.currentIndex() == 4 and not self.address.text() else None)
+            return
         service, name, text = self.service, self.wallet_picker.currentText(), self.receive_label.text()
         self.task("Requesting an address from Core…", lambda: service.receive(name, text), self.received)
 
-    def _open_receive(self):
+    def _reset_receive(self):
         self.address.clear()
         self.receive_qr.clear()
+        self.receive_visual.setCurrentIndex(0)
+        self.receive_details.hide()
+        self.receive_mark_used.setChecked(False)
         self.receive_label.clear()
+        self.receive_label.setReadOnly(False)
         self.receive_used.hide()
         self.receive_done.hide()
         self.generate_button.show()
+
+    def _open_receive(self):
+        self._reset_receive()
         self.tabs.setCurrentIndex(4)
+        QTimer.singleShot(0, self.generate)
 
     def received(self, result):
         self.address.setText(result[0])
         self.receive_qr.setPixmap(self._qr_pixmap(result[0], size=320))
+        self.receive_visual.setCurrentIndex(1)
+        self.receive_details.show()
+        self.receive_mark_used.setChecked(True)
+        self._store_address_preference(result[0], used=True)
         self.receive_used.show()
+        self.receive_label.setReadOnly(False)
         self.receive_done.show()
         self.generate_button.hide()
         self.statusBar().showMessage("Address generated by Core. Verify independently before use.")
@@ -1515,28 +2351,64 @@ class App(QMainWindow):
         QApplication.clipboard().setText(address)
         self.statusBar().showMessage("Address copied. Verify the complete pasted address before use.")
 
-    def inspect(self):
-        if not self.service or not self.wallet_picker.currentText():
-            self.statusBar().showMessage("Connect and select a wallet first.")
-            return
-        text = self.psbt.toPlainText().strip()
-        if not text or len(text) > 2 * 1024 * 1024:
-            self.statusBar().showMessage("Enter a base64 PSBT smaller than 2 MiB.")
-            return
-        service, name = self.service, self.wallet_picker.currentText()
-        self.task("Inspecting PSBT…", lambda: service.inspect_psbt(name, text), lambda result: self.show_text("Core PSBT inspection · no signing", json.dumps(result, indent=2, default=str)))
 
     def transaction_details(self, row, column):
         self.show_text("Wallet activity entry", json.dumps(self.rows[row], indent=2, default=str))
 
     def address_details(self, row, column):
-        self.show_text("Receiving address", json.dumps(self.address_rows[row], indent=2, default=str))
+        record = self.address_rows[row]
+        address = record["address"]
+        dialog, layout = self._dialog("Wallet address", size=(840, 620), online=True)
+        qr = QLabel()
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr.setPixmap(self._qr_pixmap(address, size=320))
+        layout.addWidget(qr)
+        value = QLineEdit(address)
+        value.setReadOnly(True)
+        value.setFont(fixed_font(10))
+        layout.addWidget(value)
+        name = QLineEdit(record.get("label", ""))
+        name.setPlaceholderText("Label (optional)")
+        layout.addWidget(name)
+        used = QCheckBox("Mark as used")
+        used.setToolTip("Tracking label for this address. It does not confirm an on-chain payment.")
+        used.setStyleSheet("QCheckBox::indicator { width: 22px; height: 22px; }")
+        used.setChecked(self._address_preferences().get(address, {}).get("used", record.get("amount", 0) > 0))
+        layout.addWidget(used)
+        footer = QHBoxLayout()
+        def remove():
+            if QMessageBox.question(dialog, "Remove address from list?",
+                "This address will remain part of the Core wallet and can still receive bitcoin.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes:
+                self._store_address_preference(address, hidden=True)
+                dialog.accept()
+                self.refresh()
+        footer.addWidget(button("Remove address", remove))
+        footer.addStretch()
+        def save():
+            service, wallet = self.service, self.wallet_picker.currentText()
+            self._store_address_preference(address, used=used.isChecked())
+            label_value = name.text()
+            self.task("Saving address label…", lambda: service.rpc.call("setlabel", [address, label_value], wallet=wallet),
+                      lambda _: (dialog.accept(), self.refresh()))
+        footer.addWidget(button("Done", save, True))
+        layout.addLayout(footer)
+        self._dialog_help(dialog)
+        dialog.exec()
 
     def show_text(self, title, content):
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
         dialog.resize(900, 600)
         layout = QVBoxLayout(dialog)
+        heading = QHBoxLayout()
+        heading.addStretch()
+        heading.addWidget(IconButton(
+            "close", "Close", dialog.accept,
+            tooltip="Close this window.",
+        ))
+        layout.addLayout(heading)
         text = QPlainTextEdit(content)
         text.setReadOnly(True)
         layout.addWidget(text)
@@ -1547,6 +2419,10 @@ class App(QMainWindow):
         self.show_text("About Core Companion", f"Core Companion {__version__}\n\nLinux release candidate · independent security review pending.\n\nBitcoin Core handles wallets, addresses and PSBT signing. The online view is watch-only. The cold signer uses a temporary Core process in RAM.\n\nPython / Qt Widgets. No browser engine, telemetry or local web server.")
 
     def closeEvent(self, event):
+        if self.tor_install_process is not None:
+            self.statusBar().showMessage("Wait for Tor installation to finish before closing.")
+            event.ignore()
+            return
         if self.core_download_process is not None:
             answer = QMessageBox.question(
                 self,
@@ -1568,6 +2444,11 @@ class App(QMainWindow):
             event.ignore()
             return
         if not self.cold_session:
+            if self.tor_enabled and not self._stop_managed_node():
+                event.ignore()
+                return
+            self.tor_pending = None
+            self.tor.stop()
             event.accept()
             return
         answer = QMessageBox.warning(
@@ -1575,7 +2456,7 @@ class App(QMainWindow):
             "Cold signer is active",
             "Closing the main app will close the cold signer and stop its temporary Core process. "
             + ("Swap will be restored; host networking was left on."
-               if self.dev_keep_network else "Networking and swap will be restored after those processes stop."),
+               if self.dev_keep_network else "Swap will be restored after those processes stop. Networking remains permanently disabled."),
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Close,
             QMessageBox.StandardButton.Cancel,
         )
@@ -1599,6 +2480,429 @@ class App(QMainWindow):
         else:
             event.accept()
 
+
+    def _go_back(self):
+        self.recipient_scanner.stop()
+        current = self.tabs.currentIndex()
+        if current == getattr(self, "connection_page_index", -1):
+            self._close_connection_page()
+            return
+        if current == getattr(self, "privacy_page_index", -1):
+            self.tabs.setCurrentIndex(6)
+            return
+        self.tabs.setCurrentIndex(0 if self.tabs.currentIndex() == 1 else 1 if self.tabs.currentIndex() == 7 else 2)
+
+    def _address_preferences(self):
+        wallet = self.wallet_picker.currentText()
+        endpoint = str(self.service.rpc.cookie_path) if self.service else ""
+        self.address_settings_key = "addresses/" + hashlib.sha256((endpoint + "/" + wallet).encode()).hexdigest()
+        try:
+            value = json.loads(QSettings("CoreCompanion", "CoreCompanion").value(self.address_settings_key, "{}"))
+            return {key: item for key, item in value.items() if isinstance(key, str) and isinstance(item, dict)} if isinstance(value, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    def _store_address_preference(self, address, **values):
+        preferences = self._address_preferences()
+        preferences.setdefault(address, {}).update(values)
+        QSettings("CoreCompanion", "CoreCompanion").setValue(self.address_settings_key, json.dumps(preferences))
+
+    def _finish_receive(self):
+        address = self.address.text()
+        if not address or not self.service:
+            return
+        self._store_address_preference(address, used=self.receive_mark_used.isChecked())
+        service, wallet, text = self.service, self.wallet_picker.currentText(), self.receive_label.text()
+        self.task("Saving label…", lambda: service.rpc.call("setlabel", [address, text], wallet=wallet),
+                  lambda _: (self.tabs.setCurrentIndex(2), self.refresh()))
+
+    def _send(self):
+        page = self.page("Send")
+        self._wallet_page_heading(page, "Send Bitcoin", "Create an unsigned transaction for your cold signer.")
+        panel = QFrame()
+        panel.setObjectName("FormPanel")
+        form = QFormLayout(panel)
+        form.setContentsMargins(24, 24, 24, 24)
+        form.setSpacing(16)
+        recipient_row = QHBoxLayout()
+        self.send_recipient = QLineEdit()
+        self.send_recipient.setToolTip("Recipient Bitcoin address. Scan a Bitcoin payment QR or paste the address.")
+        self.send_recipient.setPlaceholderText("Recipient address")
+        recipient_row.addWidget(self.send_recipient, 1)
+        self.recipient_scanner = QRScanner(self)
+        recipient_row.addWidget(button("Scan QR", self.recipient_scanner.scan))
+        self.recipient_scanner.decoded.connect(self._recipient_scanned)
+        self.recipient_scanner.failed.connect(lambda message: QMessageBox.warning(self, "QR scanner", message))
+        form.addRow("Recipient", recipient_row)
+        self.send_amount = QLineEdit()
+        self.send_amount.setToolTip("Amount in BTC, with up to 8 decimal places. Core calculates the final fee and change.")
+        self.send_amount.setPlaceholderText("0.00000000")
+        form.addRow("Amount · BTC", self.send_amount)
+        self.send_fee = QLineEdit("2")
+        self.send_fee.setToolTip("Fee rate in satoshis per virtual byte. Core performs coin selection and fee calculation.")
+        form.addRow("Fee rate · sat/vB", self.send_fee)
+        page.addWidget(panel)
+        page.addStretch()
+        page.addWidget(button("Review transaction", self._create_psbt, True), 0, Qt.AlignmentFlag.AlignRight)
+
+    def _recipient_scanned(self, text):
+        if text.lower().startswith("bitcoin:"):
+            uri = urlsplit(text)
+            fields = parse_qs(uri.query)
+            if any(key.startswith("req-") for key in fields):
+                QMessageBox.warning(self, "Unsupported payment request", "This QR requires additional payment fields.")
+                return
+            self.send_recipient.setText(uri.path)
+            if fields.get("amount"):
+                self.send_amount.setText(fields["amount"][0])
+        else:
+            self.send_recipient.setText(text)
+
+    def _create_psbt(self):
+        if not self.service or not self.wallet_picker.currentText():
+            return
+        service, wallet = self.service, self.wallet_picker.currentText()
+        recipient, amount, fee = self.send_recipient.text().strip(), self.send_amount.text(), self.send_fee.text()
+        self.task("Core is funding the transaction…", lambda: service.create_psbt(wallet, recipient, amount, fee),
+                  lambda result: self._review_transaction(result["decoded"]["tx"], "Review unsigned transaction",
+                    "Export unsigned PSBT", lambda: self._export_psbt(result["psbt"]),
+                    fee=result.get("fee"), change=result.get("changepos")))
+
+    def _review_transaction(self, transaction, title, action, callback, *, fee=None, change=None, allowed=True):
+        dialog, layout = self._dialog(title, "Check every output before continuing.", size=(940, 710), online=True)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        outputs = QVBoxLayout(body)
+        for index, output in enumerate(transaction.get("vout", [])):
+            script = output.get("scriptPubKey", {})
+            address = script.get("address") or script.get("hex") or "Unknown script"
+            card = QFrame()
+            card.setObjectName("FormPanel")
+            row = QVBoxLayout(card)
+            row.addWidget(label(("Change" if index == change else "Output " + str(index + 1)) + " · " + btc(output["value"]) + " BTC", "Heading"))
+            full = label(address)
+            full.setWordWrap(True)
+            full.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            row.addWidget(full)
+            outputs.addWidget(card)
+        if fee is not None:
+            outputs.addWidget(label("Fee · " + btc(fee) + " BTC", "Heading"))
+        detail = QPlainTextEdit(json.dumps(transaction, indent=2, default=str))
+        detail.setReadOnly(True)
+        detail.hide()
+        details = QCheckBox("Show Core details")
+        details.toggled.connect(detail.setVisible)
+        outputs.addWidget(details)
+        outputs.addWidget(detail)
+        outputs.addStretch()
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+        if not allowed:
+            layout.addWidget(label("Core rejected this transaction for the mempool. Check the details before retrying.", "InfoStrip"))
+        footer = QHBoxLayout()
+        footer.addWidget(button("Cancel", dialog.reject))
+        footer.addStretch()
+        def proceed():
+            dialog.accept()
+            callback()
+        proceed_button = button(action, proceed, True)
+        proceed_button.setEnabled(allowed)
+        footer.addWidget(proceed_button)
+        layout.addLayout(footer)
+        self._dialog_help(dialog)
+        dialog.exec()
+
+    def _export_psbt(self, psbt):
+        dialog, layout = self._dialog("Unsigned PSBT", "Scan with your cold signer, or save the PSBT file to an SD card.", size=(820, 740), online=True)
+        qr = QLabel()
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        try:
+            qr.setPixmap(self._qr_pixmap(psbt, size=440))
+        except (ValueError, OverflowError, DataOverflowError):
+            qr.setText("This PSBT is too large for one QR. Save the file instead.")
+        layout.addWidget(qr, 1)
+        text = QPlainTextEdit(psbt)
+        text.setReadOnly(True)
+        text.setMaximumHeight(95)
+        layout.addWidget(text)
+        def save():
+            path, _ = QFileDialog.getSaveFileName(dialog, "Save unsigned PSBT", "unsigned.psbt", "PSBT files (*.psbt)")
+            if path:
+                try:
+                    Path(path).write_bytes(base64.b64decode(psbt, validate=True))
+                except (OSError, ValueError) as exc:
+                    QMessageBox.warning(dialog, "Could not save PSBT", str(exc))
+        footer = QHBoxLayout()
+        footer.addWidget(button("Save PSBT…", save))
+        footer.addStretch()
+        footer.addWidget(button("Done", dialog.accept, True))
+        layout.addLayout(footer)
+        self._dialog_help(dialog)
+        dialog.exec()
+
+    def _import_psbt_dialog(self):
+        if not self.service or not self.wallet_picker.currentText():
+            return
+        dialog, layout = self._dialog("Import PSBT", "Load the signed PSBT by QR or from an SD card, review it, then broadcast.", size=(820, 560), online=True)
+        text = QPlainTextEdit()
+        text.setPlaceholderText("Scan, paste, or load a signed PSBT file from an SD card")
+        text.setToolTip("A signed PSBT from your signer. Importing only asks Core to finalize and check it; broadcasting requires a separate approval.")
+        layout.addWidget(text, 1)
+        scanner = QRScanner(dialog)
+        scanner.decoded.connect(text.setPlainText)
+        scanner.failed.connect(lambda message: QMessageBox.warning(dialog, "QR scanner", message))
+        def load():
+            path, _ = QFileDialog.getOpenFileName(dialog, "Open PSBT", "", "PSBT files (*.psbt);;All files (*)")
+            if not path:
+                return
+            try:
+                with Path(path).open("rb") as stream:
+                    data = stream.read(2 * 1024 * 1024 + 1)
+                if len(data) > 2 * 1024 * 1024:
+                    raise ValueError("PSBT exceeds the 2 MiB limit.")
+                text.setPlainText(base64.b64encode(data).decode() if data.startswith(b"psbt\xff") else data.decode("ascii").strip())
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(dialog, "Could not load PSBT", str(exc))
+        row = QHBoxLayout()
+        row.addWidget(button("Scan QR", scanner.scan))
+        row.addWidget(button("Load PSBT file…", load))
+        row.addStretch()
+        layout.addLayout(row)
+        def review():
+            psbt = text.toPlainText().strip()
+            if not psbt or len(psbt) > 2 * 1024 * 1024:
+                QMessageBox.warning(dialog, "PSBT required", "Load a PSBT smaller than 2 MiB.")
+                return
+            service, wallet = self.service, self.wallet_picker.currentText()
+            scanner.stop()
+            dialog.accept()
+            self.task("Core is checking the signed PSBT…", lambda: service.finalize_psbt(wallet, psbt), self._review_finalized)
+        footer = QHBoxLayout()
+        footer.addWidget(button("Back", dialog.reject))
+        footer.addStretch()
+        footer.addWidget(button("Review transaction", review, True))
+        layout.addLayout(footer)
+        self._dialog_help(dialog)
+        dialog.exec()
+        scanner.stop()
+
+    def _review_finalized(self, result):
+        acceptance = result["acceptance"][0]
+        service = self.service
+        transaction_hex = result["hex"]
+        fee = acceptance.get("fees", {}).get("base")
+        self._review_transaction(result["transaction"], "Review signed transaction", "Broadcast transaction",
+            lambda: self.task("Broadcasting through Core…", lambda: service.broadcast(transaction_hex),
+                              lambda txid: (self.show_text("Transaction broadcast", txid), self.refresh())),
+            fee=fee, allowed=acceptance.get("allowed") is True)
+
+
+    def _privacy_toggled(self, enabled, *, confirmed=False):
+        if enabled == self.tor_enabled:
+            return
+        if not self._allow_online() or self.busy or self.core_download_process is not None or self.tor_install_process is not None:
+            self.statusBar().showMessage("Finish the current operation before changing network privacy.")
+            accepted = False
+        else:
+            accepted = True
+            if not enabled and not confirmed:
+                accepted = QMessageBox.warning(self, "Disable Tor protection?",
+                    "Core downloads and blockchain connections will use the internet directly. "
+                    "Download services and Bitcoin peers can see your public IP and link activity to it. "
+                    "The managed node will stop; reconnect to use the new setting.",
+                    QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+                    QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes
+            if accepted:
+                accepted = self._stop_managed_node()
+        if accepted:
+            self.tor_pending = None
+            self.tor.stop()
+            self.disconnect()
+            self.tor_enabled = enabled
+            self.port.setReadOnly(enabled)
+            settings = QSettings("CoreCompanion", "CoreCompanion")
+            settings.setValue("network/torOnly", enabled)
+            settings.sync()
+            self._set_core_status("Tor only selected" if enabled else "Direct connection selected")
+            self.statusBar().showMessage("Network privacy saved. Connect when ready.")
+        self.tor_choice.blockSignals(True)
+        self.tor_choice.setChecked(self.tor_enabled)
+        self.tor_choice.blockSignals(False)
+        self.privacy_choice.blockSignals(True)
+        self.privacy_choice.setChecked(self.tor_enabled)
+        self.privacy_choice.blockSignals(False)
+        self.privacy_ack.blockSignals(True)
+        self.privacy_ack.setChecked(False)
+        self.privacy_ack.blockSignals(False)
+        self._update_privacy_page()
+
+    def _show_privacy_page(self):
+        if not self._allow_online():
+            return
+        self.privacy_choice.blockSignals(True)
+        self.privacy_choice.setChecked(self.tor_enabled)
+        self.privacy_choice.blockSignals(False)
+        self.tabs.setCurrentIndex(self.privacy_page_index)
+
+    def _ensure_tor(self, action):
+        if not self.tor_enabled:
+            return True
+        if not self._allow_online() or self.cold_session:
+            return False
+        if self.tor.bootstrapped:
+            return True
+        self.tor_pending = action
+        if self.tor_install_process is not None:
+            return False
+        if not _system_tool("tor") or not _system_tool("curl"):
+            self._install_tor()
+            return False
+        try:
+            self.tor.start()
+            self._set_core_status("Connecting to Tor…")
+            self.network.setText("○ Tor connecting · no direct fallback")
+        except (ValueError, OSError) as exc:
+            self.tor_pending = None
+            QMessageBox.warning(self, "Tor could not start", str(exc))
+        return False
+
+    def _tor_ready(self):
+        if not self._allow_online() or not self.tor_enabled:
+            self.tor.stop()
+            self.tor_pending = None
+            return
+        action, self.tor_pending = self.tor_pending, None
+        self._set_core_status("Tor connected · no direct fallback")
+        self.network.setText("● Tor only")
+        if action:
+            QTimer.singleShot(0, action)
+
+    def _tor_unavailable(self, message):
+        self.tor_pending = None
+        if self.tor_enabled:
+            if self.core_download_process is not None:
+                self.cancel_core_download()
+            self._set_core_status("Tor unavailable · direct access blocked", "error")
+            self.network.setText("○ Tor unavailable · no direct fallback")
+            self.statusBar().showMessage(message)
+
+    def _install_tor(self):
+        if not self._allow_online():
+            return
+        if sys.platform != "linux" or not _system_tool("apt-get") or not _system_tool("pkexec"):
+            self.tor_pending = None
+            QMessageBox.warning(self, "Tor installation", "Automatic installation requires Debian, apt and administrator authorization.")
+            return
+        answer = QMessageBox.question(self, "Install Tor?",
+            "Tor or curl was not found. Install them from this computer's signed Debian repositories? "
+            "This bootstrap uses a direct connection and requires administrator authorization. "
+            "Bitcoin downloads and node startup will wait until Tor is connected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            self.tor_pending = None
+            return
+        self._tor_install_stage("update")
+
+    def _tor_install_stage(self, stage):
+        if not self._allow_online():
+            self.tor_pending = None
+            return
+        process = QProcess(self)
+        self.tor_install_process = process
+        self.tor_install_output = ""
+        environment = QProcessEnvironment()
+        environment.insert("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        environment.insert("LANG", "C")
+        for key in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"):
+            if os.environ.get(key):
+                environment.insert(key, os.environ[key])
+        process.setProcessEnvironment(environment)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self._tor_install_read(process))
+        process.finished.connect(lambda code, _: self._tor_install_finished(process, stage, code))
+        process.errorOccurred.connect(lambda error: self._tor_install_finished(process, stage, -1)
+                                     if error == QProcess.ProcessError.FailedToStart else None)
+        arguments = [_system_tool("apt-get"), "-o", "Acquire::AllowInsecureRepositories=false",
+                     "-o", "Acquire::AllowDowngradeToInsecureRepositories=false",
+                     "-o", "APT::Get::AllowUnauthenticated=false",
+                     "-o", "APT::Update::Error-Mode=any"]
+        arguments += ["update"] if stage == "update" else ["-y", "--no-install-recommends", "install", "tor", "curl"]
+        self._set_core_status("Preparing Tor installation…" if stage == "update" else "Installing Tor and curl…")
+        process.start(_system_tool("pkexec"), arguments)
+
+    def _tor_install_read(self, process):
+        if process is self.tor_install_process:
+            self.tor_install_output = (self.tor_install_output + bytes(process.readAllStandardOutput()).decode("utf-8", "replace"))[-6000:]
+
+    def _tor_install_finished(self, process, stage, code):
+        if process is not self.tor_install_process:
+            return
+        self._tor_install_read(process)
+        self.tor_install_process = None
+        process.deleteLater()
+        if code:
+            self.tor_pending = None
+            self._set_core_status("Tor installation did not finish · Bitcoin traffic blocked", "error")
+            QMessageBox.warning(self, "Tor was not installed", self.tor_install_output[-2000:] or "Administrator authorization or installation failed.")
+            return
+        if stage == "update":
+            self._tor_install_stage("install")
+            return
+        if not _system_tool("tor") or not _system_tool("curl"):
+            self.tor_pending = None
+            self._set_core_status("Tor is still unavailable · Bitcoin traffic blocked", "error")
+            return
+        action = self.tor_pending
+        if action:
+            self._ensure_tor(action)
+
+    def _stop_managed_node(self):
+        process = self.managed_core_process
+        if process is not None and process.poll() is None:
+            self._set_core_status("Stopping Bitcoin Core safely…")
+            try:
+                process.terminate()
+                process.wait(timeout=15)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                self.statusBar().showMessage("Core is still stopping. Wait, then try again; network privacy has not changed.")
+                return False
+        self.managed_core_process = None
+        self.managed_node_tor_proxy = None
+        self.node_start_timer.stop()
+        return True
+
+    def _lock_cold_installation(self):
+        self.permanent_cold = PermanentAirgap.is_committed()
+        self.cold_required = True
+        self.online_choice.setEnabled(False)
+        self.tor_choice.setEnabled(False)
+        self.download_button.setEnabled(False)
+        self.local_core_check_button.setEnabled(False)
+        if self.tabs.currentIndex() == self.connection_page_index:
+            self.connection_return_index = 0
+            self._close_connection_page()
+        self.sync_timer.stop()
+        self.node_start_timer.stop()
+        self.connection_fallback = False
+        self.service = None
+        self.mode_indicator.setText("PERMANENT COLD")
+        self.mode_indicator.setProperty("mode", "cold")
+        self._set_core_status("Permanent cold installation · online functions disabled")
+        self.network.setText("○ Offline protection requires verification")
+        self.statusBar().showMessage("Never reconnect this computer after using a real wallet. Remove networking hardware for the strongest safeguard.")
+
+    def _allow_online(self):
+        if self.cold_required or PermanentAirgap.is_committed():
+            self._lock_cold_installation()
+            self.statusBar().showMessage("Online functions are permanently blocked on this cold installation.")
+            return False
+        return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Bitcoin Core wallet companion")
     parser.add_argument("--version", action="version", version=f"Core Companion {__version__}")
@@ -1612,7 +2916,13 @@ def main(argv=None):
             help="development only: leave host networking enabled during cold signer sessions",
         )
     args = parser.parse_args(argv)
-    application = QApplication([])
+    if args.dev_keep_network and PermanentAirgap.is_committed():
+        parser.error("This computer is committed to permanent offline mode. The development network bypass is forbidden.")
+    application = QApplication(["core-companion"])
+    application.setApplicationName("Core Companion")
+    application.setOrganizationName("CoreCompanion")
+    application.setDesktopFileName("core-companion")
+    application.setWindowIcon(QIcon(str(Path(__file__).with_name("icon.svg"))))
     application.setStyle("Fusion")
     application.setQuitOnLastWindowClosed(True)
     if args.cold_helper:
@@ -1621,21 +2931,24 @@ def main(argv=None):
         from .cold_ui import ColdSignerDialog
         dialog = ColdSignerDialog(args.bitcoind, args.session_id, dev_keep_network=args.dev_keep_network)
         if dialog.core is None:
+            print(
+                "COLD_SIGNER_FAILED "
+                + (dialog.startup_error or "The isolated Bitcoin Core process did not start."),
+                flush=True,
+            )
+            return
+        print("COLD_SIGNER_READY", flush=True)
+        if sys.stdin.readline().strip() != "SHOW":
+            dialog.shutdown_core()
             return
         dialog.show()
-        print("COLD_SIGNER_READY", flush=True)
         application.exec()
         return
     window = App(dev_keep_network=args.dev_keep_network)
     window.show()
-    if default_cookie_path().is_file():
-        window._use_core_connection(default_cookie_path(), 8332)
-        QTimer.singleShot(0, window.connect)
-    elif sys.platform == "linux" and (managed_node_dir() / ".cookie").is_file():
-        window._use_core_connection(managed_node_dir() / ".cookie", MANAGED_RPC_PORT)
-        QTimer.singleShot(0, window.connect)
-    elif sys.platform == "linux" and window._installed_core_binary():
-        window._set_core_status("Bitcoin Core is ready. Choose Online Node to start syncing.")
+    if window.cold_required:
+        window._set_core_status("Permanent cold installation · online functions disabled")
     else:
-        window._set_core_status("Bitcoin Core not found. Start it or download it below.", "error")
+        window.refresh_core_availability()
+        QTimer.singleShot(0, window.check_local_core)
     application.exec()

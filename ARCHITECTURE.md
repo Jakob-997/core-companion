@@ -21,8 +21,8 @@ call that RPC instead of adding parallel wallet logic.
 - `run.py`: cold-helper process isolation and early core-dump restrictions.
 - `install.py`, `core-companion`: hash-locked dependency installation and the
   Linux desktop launcher. `tools/build_release.py` builds the source archive.
-- `linux_cold.py`: host network and swap state changes and restoration.
-- `offline_core.py`: isolated Core lifecycle, BIP87 descriptors, address checks,
+- `linux_cold.py`: permanent network policy verification and temporary swap disable/restore.
+- `offline_core.py`: isolated Core lifecycle, multisig descriptors, address checks,
   watch-only export, and PSBT review/signing.
 - `seed.py`: temporary-wallet hashing, entropy mixing, BIP39, and BIP32 root.
 - `cold_ui.py`: cold-signer screens; it delegates key and wallet operations to
@@ -56,7 +56,7 @@ the network in that mode. The release builder disables this command-line flag;
 do not use development mode with wallets holding funds.
 The UI helper starts in its own process group, disables core dumps and Linux
 dumpability, then stops Core and removes its session directory before the
-controller restores the prior host settings.
+controller restores prior swap settings only; networking remains permanently disabled.
 
 Host network/swap state is checked every two seconds by the controller. A failed
 check stops the signer process group and invokes cleanup before restoring
@@ -75,36 +75,56 @@ Keep Core RPC bound to loopback and do not expose it to a network.
 
 ## Bitcoin Core download verification
 
-The Linux download action obtains the current stable version from the official
-download page and invokes the unchanged Bitcoin Core v32.1
-`contrib/verify-binaries/verify.py`. It downloads eight pinned public signing
-keys into a temporary GPG home, checks every full fingerprint against the
-allowlist in `core_download.py`, and marks only those keys trusted in that
-temporary home. The verifier checks the signed `SHA256SUMS` files from both
-official hosts, requires at least three accepted signatures, downloads the
-selected Linux archive, and checks its SHA-256 hash. The user's personal GPG
-keyring is not modified. Companion additionally verifies the checksum signature
-status directly with GPG, requiring three distinct non-expired, non-revoked
-pinned primary signers. Repeated signature packets do not increase this count.
+The Linux download action obtains the stable version from Core's official page.
+All HTTPS requests use system curl with an explicit selected route, HTTPS-only
+redirects, size/time limits and no inherited curl configuration or proxy bypass.
+This includes the version page, release checksums/signatures, archive and pinned
+public keys from keys.openpgp.org's HTTPS fingerprint API. Keys are imported into
+a private temporary GPG home with automatic key retrieval disabled; each full
+fingerprint is checked and only pinned keys receive temporary ownertrust.
+Companion first requires three distinct valid pinned signers for SHA256SUMS.
+It then invokes the unchanged Core v32.1 contrib/verify-binaries/verify.py in
+local bin mode to verify the signatures and archive SHA-256. GPG and the
+upstream verifier do not perform downloads. The user's GPG keyring is untouched.
+Repeated signature packets do not increase the threshold.
 The pinned set was confirmed against Bitcoin Core
 v32.1's official `SHA256SUMS.asc`; signer rotation requires a reviewed app
 update. Only after verification succeeds does the app install the package. The extractor rejects
 absolute or parent paths, links, special files and unexpectedly large members,
 and stages files before placing the completed directory in the app's data
-folder. The upstream verifier requires `gpg` and `wget`; it and its MIT license
+folder. The download requires system curl and GPG; the unchanged verifier and its MIT license
 are under `companion/vendor/bitcoin-core/`.
 
 When Online Node is selected, Linux starts the verified Core binary in a
-separate app-managed data directory under `~/.local/share/core-companion/`.
-The node enables RPC only on loopback, uses its cookie from that data directory,
-and starts with `-prune=10000`. It runs independently after the UI closes and
-reconnects on the next app launch. Downloading Core does not start the node;
-cold-signer setup therefore does not silently bring up online networking. If a
-Core cookie exists in the standard user data directory, Companion tries that
-node first. If that connection is stale or fails, selecting Online Node starts
-its managed node. A stale connection record does not start online peer
-networking before the user chooses Online Node. Managed startup waits are
-bounded, and a stale managed cookie no longer causes an endless reconnect loop.
+separate app-managed directory under ~/.local/share/core-companion. RPC is
+loopback-only, cookie-authenticated, and the default pruning target is 10000 MiB.
+Welcome offers network privacy before any connection or node startup. Tor-only
+mode starts an unprivileged private Tor client and waits for bootstrap before
+any Bitcoin download or managed node launch. It never adopts an external Core
+node or an old cookie as evidence of Tor configuration. A fresh local RPC port
+is assigned to the managed Tor node, whose getnetworkinfo proxy/limited-network
+settings are checked before accepting the connection.
+
+Core receives onlynet=onion, proxy/onion, stream-isolation, no DNS/DNS seeds,
+fixed onion seeds, no listening/discovery and no NAT port mapping. curl uses
+socks5h so hostnames are resolved through Tor, explicitly clearing NO_PROXY.
+Proxy failures never trigger a direct retry. Tor loss leaves the node unable
+to connect directly. Tor-only Core is stopped before Tor on app closure or a
+privacy change. Direct-mode Core may continue independently as before.
+
+The Tor checkbox is also available under Tools & Settings / Network privacy.
+Disabling it warns that peers/download services can see the public IP; Cancel
+is the default. Changing privacy stops the managed node, clears the connection
+and requires the user to reconnect. External nodes/other applications are not
+changed. This is application routing, not a machine-wide Tor firewall.
+
+Missing Tor/curl offers a signed distro-package installation through fixed
+system apt-get and pkexec, with insecure/unauthenticated repositories forbidden.
+This explicit bootstrap exception uses a direct repository connection; the app
+explains it and waits for consent and administrator authorization. No Bitcoin
+traffic starts until installation and Tor bootstrap succeed. Failed/cancelled
+installation never switches the selected route. Permanently cold computers
+cannot install/start Tor; their network policy also masks Tor system services.
 
 ## Seed and key flow
 
@@ -113,34 +133,52 @@ bounded, and a stale managed cookie no longer causes an endless reconnect loop.
    directory on a verified tmpfs mount.
 2. Create a throwaway descriptor wallet, unload it, and hash its closed
    `wallet.dat` with SHA-256.
-3. Before dice entry, obtain 32 fresh bytes from the Linux system CSPRNG. Display
+3. Before user entropy entry, obtain 32 fresh bytes from the Linux system CSPRNG. Display
    actual OS bytes and wallet-file hash in the collapsed secret Audit details.
    Retain those same original inputs in signer memory. On
-   Generate, combine those fixed inputs with the dice digits using the documented,
+   Generate, combine those fixed inputs with the exact UTF-8 user input using the documented,
    length-prefixed domain-separated SHA-256 in `seed.py`; no new randomness is
-   drawn after dice entry. Truncate only to the selected standard BIP39 size.
+   drawn after user entropy entry. Truncate only to the selected standard BIP39 size.
 4. Encode the entropy and validate/recover English BIP39 words with Trezor's
    `python-mnemonic`. `to_seed()` applies the optional BIP39 passphrase;
    `to_hd_master_key()` produces the BIP32 root xprv. Bitcoin Core imports that
    root with `addhdkey` and owns all child-key and descriptor derivation.
-5. For multisig, Core derives the local signer account at
-   `m/87h/0h/0h` first. The UI shares its public account key before asking for
+5. For multisig, Core derives the local signer account at the fixed
+   `m/87h/0h/0h` path. The UI does not ask the user to select a local path.
+   Cosigner xpubs retain their actual origin paths, including BIP48 and custom
+   paths; no shared derivation convention is required.
+   A ranged public descriptor is passed to getdescriptorinfo for each key;
+   Core validates and canonicalizes origins and extended keys. The UI shares
+   the local public account key before asking for
    other signers, and clears the phrase/passphrase fields. Once the other keys
    are collected, the app builds receive and change `wsh(sortedmulti(...))`
    descriptors with full key origins, asks Core to checksum and import them,
    then checks that Core recognizes the first receive address as its own.
 6. On close, stop Core, remove its tmpfs session directory, and restore the
-   previous swap and link states. Python does not guarantee erasure of secret
+   previous swap state only. Networking is never re-enabled. Python does not guarantee erasure of secret
    strings from process memory. The helper isolation reduces exposure but does
    not make this a reviewed or production-secure signer.
 
-Before closing, the user can export the public receive/change descriptors and
-wallet name as a QR or JSON file. A closing prompt explains the temporary
-session and offers export. Core supplies the public descriptors; private descriptors
-are never used for this export. The online importer checks that both descriptors are
-public and solvable, creates a wallet with private keys disabled, and delegates
-import and historical scanning to Core. Pruned-away history cannot be recovered
-by this import without obtaining the missing blocks.
+Wallet-file encryption is optional. Core backupwallet writes a consistent
+backup with the selected encryption state, permissions are set to 0600, and an
+atomic rename replaces the previous wallet.dat. The app records and checks that
+state when reopening. Unencrypted backups contain usable private keys; the
+application data directory is mode 0700, but full-disk encryption and physical
+protection remain important. Public metadata is saved separately with atomic
+writes and directory fsync. A held flock prevents simultaneous writers. The
+app backs up after setup, address generation, label/status changes and before
+switching or closing. On reopen it copies the backup into the private tmpfs
+wallet directory. Core loads encrypted backups locked; unencrypted backups are
+available without a wallet password. The throwaway entropy wallet never enters
+this persistent storage.
+
+Public exports combine the exact receive/change pair into /<0;1>/* only after
+Core confirms expansion reproduces both original canonical descriptors. Core
+also supplies the checksum. QR/text export carries that plain descriptor.
+The importer accepts this form, pairs, xpubs, zpubs and ypubs. Only public-key
+version conversion is local; Base58Check is verified and Core validates and
+expands descriptors before wallet creation. Pruned-away history cannot be
+recovered by a rescan.
 
 BIP39's checksum does not always identify a unique final word. For a partial
 phrase, the recovery screen displays the checksum-valid candidates and asks the
@@ -189,3 +227,36 @@ termination, system-specific network management, Core RPC compatibility,
 descriptor interoperability, PSBT display and signing review, and packaging.
 Do not treat a small codebase or Core-backed operations as a substitute for an
 independent security review.
+
+The new storage.py owns atomic encrypted Core backups and a single-writer file lock. public_wallet.py owns public-key version conversion and Core-validated multipath interchange. The online send path delegates funding, decoding, finalization, mempool checks and explicitly approved broadcast to Core. PSBTv0 is requested for broad external-signer compatibility.
+
+## Permanent offline commitment (supersedes session-only network restoration)
+
+Normal mode installs the root-owned boot firewall/radio/link policy and timer in
+PERMANENT_AIRGAP.md. linux_cold.NetworkSession now verifies that policy and has
+no network restoration or enable method. ColdSystemSession.restore restores
+swap only. permanent_airgap.py checks per-boot fresh root success, exact policy
+files, masks, timer and current links/radios before private operations. The app
+locks online paths and startup connections once committed. The development flag
+cannot bypass an existing machine-wide commitment. Installer and Core downloader
+also enforce offline operation. Hardware removal remains the strongest safeguard.
+
+
+Multisig origin validation does not establish that a supplied fingerprint/path
+actually belongs to another signer's seed. It validates public key encoding and
+descriptor syntax through Core. Keep the complete public wallet policy and
+independently compare receiving addresses across signers. Incoming fields accept
+account xpubs with origins, not already-ranged branch descriptors: the wizard
+adds /0/* and /1/* itself. Duplicate xpub rejection is independent of origin
+labels/paths. The local signer always uses `m/87h/0h/0h`; Core derives and retains
+that same path during preparation and private multisig completion.
+
+
+## Welcome connection boundary
+
+Application startup reads local Core files only. A user-requested connection
+check uses authenticated, read-only loopback RPC to an already-running Core; it
+does not launch Core, Tor or Bitcoin peer networking. Tor's SOCKS port is
+reserved only when a Tor-protected download or Online Node connection starts.
+Core downloads are explicit, and Tor stops after download unless Online Node
+was requested.
