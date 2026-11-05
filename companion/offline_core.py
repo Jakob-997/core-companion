@@ -18,27 +18,36 @@ from .rpc import CoreError, CoreRPC
 from .seed import hash_wallet_dat, master_xprv
 from .storage import ColdWalletStore
 from .permanent_airgap import PermanentAirgap
-from .public_wallet import combined_public_descriptor
+from .public_wallet import combined_public_descriptor, normalize_slip132_public_key
 
 
 DEFAULT_MULTISIG_PATH = "m/87h/0h/0h"
 
 
 def normalize_account_key(rpc, value):
-    """Core validates the xpub and origin; no derivation convention is required."""
+    """Normalize hardware-wallet keys; Core verifies the key and optional origin."""
     if not isinstance(value, str) or len(value) > 4096:
-        raise ColdSetupError("Enter a public xpub with its origin fingerprint and path.")
+        raise ColdSetupError("Enter a public extended key with optional origin information.")
     value = "".join(value.split())
-    if not re.fullmatch(r"\[[^\[\]]+\]xpub[1-9A-HJ-NP-Za-km-z]+", value):
+    match = re.fullmatch(
+        r"(\[[^\[\]]+\])?((?:xpub|ypub|zpub|Ypub|Zpub)[1-9A-HJ-NP-Za-km-z]{80,120})",
+        value,
+    )
+    if match is None:
         raise ColdSetupError(
-            "Each signer needs an xpub with its origin, for example "
-            "[fingerprint/48h/0h/0h/2h]xpub…"
+            "Enter a mainnet extended public key, optionally prefixed with its origin, "
+            "for example [fingerprint/48h/0h/0h/2h]Zpub…"
         )
+    origin, key = match.groups()
+    try:
+        value = (origin or "") + normalize_slip132_public_key(key)
+    except CoreError as exc:
+        raise ColdSetupError(str(exc)) from None
     prefix, suffix = "wpkh(", "/0/*)"
     try:
         checked = rpc.call("getdescriptorinfo", [prefix + value + suffix])
     except CoreError as exc:
-        raise ColdSetupError(f"Core rejected the signer xpub or origin.\n\n{exc}") from None
+        raise ColdSetupError(f"Core rejected the signer key or origin.\n\n{exc}") from None
     if not isinstance(checked, dict) or not isinstance(checked.get("descriptor"), str):
         raise ColdSetupError("Core returned an invalid signer-key description.")
     descriptor = checked.get("descriptor", "").split("#", 1)[0]

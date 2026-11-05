@@ -2614,7 +2614,7 @@ class App(QMainWindow):
         dialog.exec()
 
     def _export_psbt(self, psbt):
-        dialog, layout = self._dialog("Unsigned PSBT", "Scan with your cold signer, or save to a file.", size=(820, 740), online=True)
+        dialog, layout = self._dialog("Unsigned PSBT", "Scan with your cold signer, or save the PSBT file to an SD card.", size=(820, 740), online=True)
         qr = QLabel()
         qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         try:
@@ -2644,9 +2644,9 @@ class App(QMainWindow):
     def _import_psbt_dialog(self):
         if not self.service or not self.wallet_picker.currentText():
             return
-        dialog, layout = self._dialog("Import PSBT", "Review the signed transaction before broadcasting.", size=(820, 560), online=True)
+        dialog, layout = self._dialog("Import PSBT", "Load the signed PSBT by QR or from an SD card, review it, then broadcast.", size=(820, 560), online=True)
         text = QPlainTextEdit()
-        text.setPlaceholderText("Scan, paste, or load the signed PSBT")
+        text.setPlaceholderText("Scan, paste, or load a signed PSBT file from an SD card")
         text.setToolTip("A signed PSBT from your signer. Importing only asks Core to finalize and check it; broadcasting requires a separate approval.")
         layout.addWidget(text, 1)
         scanner = QRScanner(dialog)
@@ -2666,7 +2666,7 @@ class App(QMainWindow):
                 QMessageBox.warning(dialog, "Could not load PSBT", str(exc))
         row = QHBoxLayout()
         row.addWidget(button("Scan QR", scanner.scan))
-        row.addWidget(button("Load file…", load))
+        row.addWidget(button("Load PSBT file…", load))
         row.addStretch()
         layout.addLayout(row)
         def review():

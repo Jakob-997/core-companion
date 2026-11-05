@@ -551,7 +551,7 @@ class ColdSignerDialog(QDialog):
 
     def _build_multisig_page(self):
         layout = self._card(scroll=True, surface=False)
-        _heading(layout, "MULTISIG POLICY", "Add your other signers", "Share your public key, then enter each signer’s label, xpub and origin.")
+        _heading(layout, "MULTISIG POLICY", "Add your other signers", "Share your public key, then enter each signer’s label, extended public key and origin.")
         own_panel = _panel(layout, "Your signer")
         own_key_row = QHBoxLayout()
         own_key_row.setSpacing(24)
@@ -1148,7 +1148,7 @@ class ColdSignerDialog(QDialog):
             "Import file…": "Load a binary or base64 PSBT file of up to 2 MiB for review.",
             "Review transaction": "Ask Core to decode the PSBT and display every output and the fee. This does not sign it.",
             "Sign reviewed transaction": "Sign only the exact transaction shown in the review. Core does not finalize or broadcast it.",
-            "Save signed PSBT…": "Save the signed PSBT as base64 text for transfer to another signer or the online wallet.",
+            "Save signed PSBT…": "Save a binary .psbt file for another signer or an SD card; base64 text is also available.",
             "Verify address": "Ask Core whether this address belongs to the selected wallet. A match does not show whether it has received funds.",
         }
         next_steps = {
@@ -1714,7 +1714,7 @@ class ColdSignerDialog(QDialog):
         name = QLineEdit(suggested_label)
         name.setPlaceholderText("Signer label")
         key = QLineEdit()
-        key.setPlaceholderText("[fingerprint/path]xpub…")
+        key.setPlaceholderText("Zpub… or [fingerprint/path]xpub…")
         key.setFont(fixed_font(9))
         scan = QPushButton("Scan")
         scan.clicked.connect(lambda checked=False, field=key: self._start_qr_scanner(field))
@@ -1725,7 +1725,7 @@ class ColdSignerDialog(QDialog):
         self.signer_fields.append((name, key, scan))
         for widget, tip in (
             (name, "A short label to identify this signer in the wallet policy."),
-            (key, "The signer’s xpub with its actual fingerprint and origin path. BIP48, BIP87 and custom paths are accepted."),
+            (key, "Accepts xpub, ypub, zpub, Ypub or Zpub. For hardware-wallet signing, include the key origin when available; no fixed derivation path is forced."),
             (scan, "Scan this signer’s public account key QR."),
         ):
             widget.setToolTip(tip)
@@ -1780,7 +1780,7 @@ class ColdSignerDialog(QDialog):
             signer_label = name.text().strip()
             signer_key = key.text().strip()
             if not signer_label or not signer_key:
-                QMessageBox.warning(self, "Complete signer details", "Enter a label and xpub with origin information for every other signer.")
+                QMessageBox.warning(self, "Complete signer details", "Enter a label and an extended public key for every other signer. Add origin details when available.")
                 return
             if signer_label.casefold() in seen_labels:
                 QMessageBox.warning(self, "Signer labels", "Each signer needs a different label.")
@@ -2272,12 +2272,24 @@ class ColdSignerDialog(QDialog):
         text = self.signed_psbt.toPlainText().strip()
         if not text:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Save signed PSBT", "signed-transaction.psbt", "PSBT files (*.psbt);;Text files (*.txt)")
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save signed PSBT",
+            "signed-transaction.psbt",
+            "Binary PSBT (*.psbt);;Base64 text (*.txt)",
+        )
         if not path:
             return
         try:
-            Path(path).write_text(text + "\n", encoding="ascii")
-        except OSError as exc:
+            if selected_filter.startswith("Base64"):
+                if Path(path).suffix.lower() != ".txt":
+                    path = str(Path(path).with_suffix(".txt"))
+                Path(path).write_text(text + "\n", encoding="ascii")
+            else:
+                if Path(path).suffix.lower() != ".psbt":
+                    path = str(Path(path).with_suffix(".psbt"))
+                Path(path).write_bytes(base64.b64decode(text, validate=True))
+        except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Could not save PSBT", str(exc))
 
     def _export_watchonly_wallet(self):
